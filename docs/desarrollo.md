@@ -97,6 +97,49 @@ alembic upgrade head            # por si alguien subió migraciones nuevas
 uvicorn app.main:app --reload
 ```
 
+## Roles en tu base local
+
+La migración `0010` crea los roles `vectoredit_migrator`, `vectoredit_platform` y `vectoredit_agent`
+(qué puede cada uno: [base-de-datos.md](base-de-datos.md#roles-y-seguridad-por-fila)). Así que con
+`alembic upgrade head` ya los tienes. Son roles **sin login**; si quieres entrar con ellos, crea un usuario
+con contraseña por cada uno (elige tus contraseñas, no se guardan en ningún lado del repo):
+
+```bash
+psql -d test_1 -v ON_ERROR_STOP=1 \
+  -v migrator_password=<contraseña> -v platform_password=<contraseña> -v agent_password=<contraseña> \
+  -f scripts/create_login_roles.sql                                                 # Mac / Linux
+```
+
+```powershell
+& "C:\Program Files\PostgreSQL\17\bin\psql.exe" -U postgres -d test_1 -v ON_ERROR_STOP=1 `
+  -v migrator_password=<contraseña> -v platform_password=<contraseña> -v agent_password=<contraseña> `
+  -f scripts/create_login_roles.sql                                                 # Windows
+```
+
+Crea `vectoredit_migrator_login`, `vectoredit_platform_login` y `vectoredit_agent_login`. Si lo corres otra vez,
+solo cambia las contraseñas.
+
+Para el día a día puedes seguir con tu superusuario en `DATABASE_URL`, pero ten en cuenta:
+
+- **Un superusuario se salta la seguridad por fila.** La app funciona, pero no te protege. Para ver lo mismo
+  que verá la app desplegada, usa `vectoredit_platform_login` en `DATABASE_URL` (las migraciones siguen
+  necesitando el migrador o tu superusuario).
+  Con `APP_ENV=staging` o `production` la app **no arranca** si `DATABASE_URL` es un superusuario, tiene
+  `BYPASSRLS`, es miembro del migrador o no es miembro de `vectoredit_platform` (`check_app_role()` en
+  `app/core/db.py`). Alembic sí corre con el migrador: en esos entornos la app y las migraciones usan
+  `DATABASE_URL` distintos.
+- Las pruebas de `tests/test_database_security.py` cambian de rol con `SET ROLE`, así que necesitan que
+  `DATABASE_URL` sea un superusuario (o miembro de los tres roles).
+- La migración `0010` la corre un usuario que pueda crear roles (tu superusuario). Después, las migraciones
+  se pueden correr con `vectoredit_migrator_login`.
+- Los roles son de todo el servidor PostgreSQL, no de una base: si tienes varias bases locales, las comparten.
+
+Para probar como el agente desde la terminal:
+
+```bash
+psql -d test_1 -U vectoredit_agent_login -c "DELETE FROM platform.accounts"   # permission denied
+```
+
 ## Variables de entorno
 
 Todas se leen en `app/core/config.py`. `.env` nunca se sube al repo; `.env.example` sí, sin claves reales.
@@ -170,8 +213,11 @@ No dejan datos: cada una se deshace al terminar.
 1. Instala `requirements-dev.txt`.
 2. Lint y formato con ruff.
 3. Tipos con mypy.
-4. `alembic upgrade head` y `alembic check` contra un PostgreSQL real (detecta modelos sin migración).
-5. pytest.
+4. `alembic upgrade head`, `downgrade base` y otra vez `upgrade head` contra un PostgreSQL real.
+5. Crea los usuarios con login con `scripts/create_login_roles.sql` (contraseñas de usar y tirar, solo para la CI).
+6. `alembic check` conectado como `vectoredit_migrator_login`, que no es superusuario (detecta modelos sin migración
+   y que el migrador puede trabajar solo).
+7. pytest. `AGENT_DATABASE_URL` activa la prueba que entra con el usuario real del agente.
 
 ## Dependencias
 

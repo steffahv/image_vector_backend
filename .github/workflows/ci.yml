@@ -21,7 +21,13 @@ jobs:
           --health-cmd "pg_isready -U ci -d image_vector_ci"
           --health-interval 5s --health-timeout 5s --health-retries 10
     env:
+      # Superuser: runs the first migrations (0010 creates the roles) and the tests, which switch
+      # to each service role with SET ROLE.
       DATABASE_URL: postgresql+psycopg://ci:ci@localhost:5432/image_vector_ci
+      # Throwaway passwords for the CI database only.
+      MIGRATOR_DATABASE_URL: postgresql+psycopg://vectoredit_migrator_login:migrator_ci@localhost:5432/image_vector_ci
+      AGENT_DATABASE_URL: postgresql+psycopg://vectoredit_agent_login:agent_ci@localhost:5432/image_vector_ci
+      PGPASSWORD: ci
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -36,6 +42,15 @@ jobs:
       - name: Type check
         run: mypy
       - name: Migrations
-        run: alembic upgrade head && alembic check
+        run: alembic upgrade head && alembic downgrade base && alembic upgrade head
+      - name: Create login users
+        run: >-
+          psql -h localhost -U ci -d image_vector_ci -v ON_ERROR_STOP=1
+          -v migrator_password=migrator_ci -v platform_password=platform_ci
+          -v agent_password=agent_ci -f scripts/create_login_roles.sql
+      - name: Migrations as the migrator (not a superuser)
+        run: alembic check
+        env:
+          DATABASE_URL: ${{ env.MIGRATOR_DATABASE_URL }}
       - name: Tests
         run: pytest
