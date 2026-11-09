@@ -5,7 +5,9 @@ Add the import when you create a new module; otherwise
 `alembic revision --autogenerate` will not detect its tables.
 """
 
+from app.agent import models as agent_models  # noqa: F401
 from app.auth import models as auth_models  # noqa: F401
 from app.billing import models as billing_models  # noqa: F401
 from app.documents import models as documents_models  # noqa: F401
+from app.jobs import models as jobs_models  # noqa: F401
 from app.storage import models as storage_models  # noqa: F401

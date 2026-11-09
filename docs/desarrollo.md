@@ -137,7 +137,7 @@ alembic current                                             # versión aplicada
 - Revisa siempre el archivo generado en `alembic/versions/` antes de aplicarlo: autogenerate no detecta todo
   (por ejemplo, cambios de nombre de columna o políticas de seguridad por fila).
 - Si creas un módulo nuevo con `models.py`, regístralo en `app/core/models_registry.py` o Alembic no verá sus tablas.
-- Los nombres de índices y restricciones salen de `NAMING_CONVENTION` en `app/core/db.py`.
+- Los nombres de índices y restricciones salen de `NAMING_CONVENTION` en `app/core/model_base.py`.
 
 ## Swagger
 
@@ -161,7 +161,8 @@ mypy                                    # tipos (modo estricto)
 pytest                                  # pruebas
 ```
 
-Las pruebas leen `DATABASE_URL` de tu `.env`, así que necesitas haberlo creado antes.
+Las pruebas leen `DATABASE_URL` de tu `.env` y algunas usan la base, así que antes necesitas el `.env` y `alembic upgrade head`.
+No dejan datos: cada una se deshace al terminar.
 
 `.github/workflows/ci.yml` corre en cada PR y en cada push a `main`:
 

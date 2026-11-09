@@ -4,8 +4,8 @@
 
 - **Todo el código en inglés**: módulos, archivos, clases, funciones, variables, rutas, comentarios y docstrings.
 - **La documentación en español** (`README.md` y `docs/`).
-- Los esquemas de PostgreSQL conservan los nombres del modelo relacional:
-  `auth`, `plataforma`, `almacenamiento`, `cobro`, `agente`, `operacion`.
+- **La base también en inglés**: esquemas, tablas, columnas y valores de estado. El modelo relacional
+  está en español; la traducción de nombres está en [base-de-datos.md](base-de-datos.md).
 
 ## Nombres
 
@@ -43,7 +43,7 @@
 1. Crea `app/<module>/` con `__init__.py`, `router.py`, `schemas.py`, `service.py` y `models.py`.
    Cada archivo empieza con un docstring que dice qué va en él.
 2. Registra el router en `app/main.py`.
-3. Registra los modelos en `app/core/models_registry.py`.
+3. Registra los modelos en `app/core/models_registry.py` (cómo escribirlos: [base-de-datos.md](base-de-datos.md)).
 4. Agrega su tag en `TAGS_METADATA` de `app/core/openapi.py`.
 5. Documéntalo en `docs/arquitectura.md`.
 

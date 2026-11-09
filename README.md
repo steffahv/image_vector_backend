@@ -69,12 +69,84 @@ Más detalle (contraseñas con caracteres especiales, cómo comprobar la base, r
 - ReDoc: `http://127.0.0.1:8000/redoc`
 - Salud: `http://127.0.0.1:8000/api/v1/health`
 
+## Migraciones
+
+Las tablas se crean y cambian **solo con migraciones de Alembic**, nunca a mano en la base.
+Cada migración es un archivo en `alembic/versions/` y se sube al repo junto con el cambio de modelo.
+
+### Aplicar las migraciones del repo
+
+Después de clonar o de cada `git pull`:
+
+```bash
+alembic upgrade head            # deja tu base igual que el código
+alembic current                 # muestra en qué migración está tu base
+```
+
+### Crear una migración nueva
+
+1. Escribe o cambia la tabla en el `models.py` del módulo
+   (cómo: [docs/base-de-datos.md](docs/base-de-datos.md)).
+2. Genera la migración comparando los modelos con tu base:
+
+   ```bash
+   alembic revision --autogenerate -m "add platform folders"
+   ```
+
+3. **Revisa el archivo generado** en `alembic/versions/`. Autogenerate no detecta todo
+   (cambios de nombre, algunos `CHECK`, índices parciales, políticas por fila).
+4. Aplícala y comprueba que también se puede deshacer:
+
+   ```bash
+   alembic upgrade head
+   alembic downgrade -1
+   alembic upgrade head
+   ```
+
+5. Comprueba que no falta nada por migrar:
+
+   ```bash
+   alembic check                   # debe decir: No new upgrade operations detected
+   ```
+
+6. Sube el modelo y la migración en el mismo PR.
+
+### Otros comandos
+
+```bash
+alembic history                 # lista de migraciones
+alembic downgrade -1            # deshace la última
+alembic downgrade base          # deshace todas (deja la base vacía)
+```
+
+Si tu base queda en mal estado, empieza de cero:
+
+```bash
+dropdb test_1 && createdb test_1 && alembic upgrade head
+```
+
+En Windows usa pgAdmin (clic derecho en la base → **Delete**, y créala de nuevo) y luego `alembic upgrade head`.
+
+### Si dos personas crean migraciones a la vez
+
+Cada migración apunta a la anterior (`down_revision`). Si dos ramas parten de la misma, al unirlas
+Alembic avisa que hay dos «heads». Lo arregla **quien une segundo**:
+
+```bash
+git pull origin main
+alembic heads                   # muestra las dos puntas
+```
+
+Abre tu migración y cambia `down_revision` por el `revision` de la última migración de `main`.
+Luego `alembic upgrade head` y `alembic check`.
+
 ## Documentación
 
 | Documento | Qué explica |
 |---|---|
 | [docs/arquitectura.md](docs/arquitectura.md) | Para qué sirve cada módulo, qué archivo lleva cada uno, cómo se comunican y un ejemplo completo (guardar un documento). |
-| [docs/desarrollo.md](docs/desarrollo.md) | Base local (Mac y Windows), variables de `.env`, migraciones en equipo, Swagger, pruebas y CI. |
+| [docs/desarrollo.md](docs/desarrollo.md) | Base local (Mac, Windows y Linux), variables de `.env`, migraciones en equipo, Swagger, pruebas y CI. |
+| [docs/base-de-datos.md](docs/base-de-datos.md) | Esquemas, nombres en inglés, molde de una tabla con ejemplo, reglas (FK por espacio, estados, borrado) y cómo pasar de modelo a migración. |
 | [docs/convenciones.md](docs/convenciones.md) | Reglas de código: idioma, nombres, tipos, comentarios y cómo agregar un módulo o una ruta. |
 
 ## Estructura
@@ -82,12 +154,13 @@ Más detalle (contraseñas con caracteres especiales, cómo comprobar la base, r
 ```text
 app/
 ├── main.py              # Crea la app, configura Swagger y registra los routers
-├── core/                # Configuración, base de datos, registro de modelos y metadatos de Swagger
+├── core/                # Configuración, base de datos, base de las tablas, registro de modelos y Swagger
 ├── health/              # GET /api/v1/health
 ├── auth/                # Cuentas y sesión
 ├── documents/           # Documentos, revisiones, versiones, carpetas, papelera y compartir
 ├── storage/             # Archivos en S3 y cuotas
 ├── billing/             # Planes, pagos y créditos
+├── agent/               # Solo tablas del esquema agent (las usa el servicio del agente)
 └── jobs/                # Trabajos de mantenimiento (proceso aparte, sin rutas)
 alembic/                 # Migraciones de la base
 tests/                   # Pruebas con pytest
