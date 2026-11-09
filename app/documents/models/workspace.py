@@ -29,6 +29,7 @@ class Workspace(UUIDPrimaryKey, Timestamps, Base):
     )
 
     # No cascade: deleting the account must not silently delete its documents (§IX-C).
-    owner_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("platform.accounts.id"))
+    # Indexed for every type: the partial index above only covers personal workspaces.
+    owner_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("platform.accounts.id"), index=True)
     name: Mapped[str]
     type: Mapped[WorkspaceType] = mapped_column(text_enum(WorkspaceType, "type"))

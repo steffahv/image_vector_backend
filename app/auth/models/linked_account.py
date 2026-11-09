@@ -20,13 +20,14 @@ class LinkedAccount(UUIDPrimaryKey, Timestamps, Base):
     __tablename__ = "accounts"
     __table_args__ = (
         UniqueConstraint("provider", "provider_account_id"),
+        # One account per provider and person: a user cannot link two Google accounts.
+        # Starts with user_id, so it also serves lookups by user.
+        UniqueConstraint("user_id", "provider"),
         {"schema": DbSchema.AUTH},
     )
 
     # Purely dependent on the user, so it is removed with it (Modelo relacional §IX-C).
-    user_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("auth.users.id", ondelete="CASCADE"), index=True
-    )
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("auth.users.id", ondelete="CASCADE"))
     provider: Mapped[IdentityProvider] = mapped_column(text_enum(IdentityProvider, "provider"))
     # The provider's stable user id (Google's `sub`), never the email.
     provider_account_id: Mapped[str]
