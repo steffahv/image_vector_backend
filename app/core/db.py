@@ -69,7 +69,11 @@ def set_current_account(db: Session, account_id: uuid.UUID | None) -> None:
 
     Without an account, tables with RLS show no rows and accept no writes.
     The auth dependency (VEC-4) calls this once it knows who is signed in.
+    Setting an account also clears the signed-in user from `set_current_user()`: that one is only
+    for finding the account during sign-in, and must not keep widening what the session sees.
     """
+    if account_id is not None and db.info.get("user_id") is not None:
+        _set_identity(db, "user_id", None)
     _set_identity(db, "account_id", account_id)
 
 
@@ -78,6 +82,7 @@ def set_current_user(db: Session, auth_user_id: uuid.UUID | None) -> None:
 
     The accounts policy then also shows that user's own account, so sign-in can find it, or
     create it the first time, before it knows the account id. Only `platform.accounts` uses it.
+    `set_current_account()` clears it once the account is known.
     """
     _set_identity(db, "user_id", auth_user_id)
 

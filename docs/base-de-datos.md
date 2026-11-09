@@ -279,10 +279,14 @@ set_current_user(db, auth_user.id)
 account = db.scalar(select(Account).where(Account.auth_user_id == auth_user.id))
 if account is None:
     account = Account(auth_user_id=auth_user.id, ...)  # primera vez
-set_current_account(db, account.id)
+set_current_account(db, account.id)  # también limpia el usuario conectado
 ```
 
-Solo `platform.accounts` usa el usuario conectado; las demás tablas filtran por la cuenta.
+Solo `platform.accounts` usa el usuario conectado; las demás tablas filtran por la cuenta. En cuanto se fija la
+cuenta, `set_current_account()` limpia el usuario conectado, así la sesión no sigue viendo más de una cuenta.
+
+El `id` y el `auth_user_id` de una cuenta no se pueden cambiar (trigger `accounts_keep_identity`): una cuenta
+no puede pasar a ser de otro usuario aunque el código tenga un error.
 
 Las tablas de `auth` no tienen RLS: se consultan antes de saber qué cuenta es (iniciar sesión, validar la cookie).
 
@@ -332,6 +336,26 @@ CREATE POLICY account_isolation ON platform.documents
   `agent.reservations`): además de la política, el agente no debe escribirlas directo. La migración que
   las crea quita esos permisos (`REVOKE INSERT, UPDATE, DELETE ... FROM vectoredit_agent`) y da `EXECUTE`
   solo sobre las funciones de reserva y descuento (VEC-41).
+
+### Funciones
+
+Las funciones que crea el migrador **no las puede ejecutar nadie** hasta que la migración que las crea lo
+permita (`ALTER DEFAULT PRIVILEGES ... REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC`, migración `0010`). Por eso
+cada función nueva lleva su `GRANT EXECUTE` a los roles que la usan:
+
+```sql
+CREATE FUNCTION billing.reserve_credits(...) RETURNS ...
+    LANGUAGE plpgsql
+    SECURITY DEFINER                     -- corre como el migrador: se salta RLS a propósito
+    SET search_path = pg_catalog, pg_temp
+AS $$ ... $$;
+GRANT EXECUTE ON FUNCTION billing.reserve_credits(...) TO vectoredit_agent;
+```
+
+- Una función `SECURITY DEFINER` se salta RLS, así que valida ella misma la cuenta
+  (`platform.current_account_id()`) y nunca confía en un id que le pasen.
+- Siempre con `SET search_path = pg_catalog, pg_temp` y nombres completos (`billing.credit_balances`), para
+  que nadie pueda colarle una tabla o función con el mismo nombre.
 
 ## Pruebas contra la base
 

@@ -9,7 +9,7 @@ import uuid
 
 import pytest
 from sqlalchemy import create_engine, func, select, text, update
-from sqlalchemy.exc import ProgrammingError
+from sqlalchemy.exc import IntegrityError, ProgrammingError
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.auth.models import AuthUser
@@ -98,17 +98,6 @@ def test_an_account_cannot_change_or_delete_another(
     assert deleted.rowcount == 0
 
 
-def test_an_account_cannot_move_its_row_to_another(
-    db: Session, two_accounts: tuple[Account, Account]
-) -> None:
-    ana, luis = two_accounts
-    _as_role(db, PLATFORM_ROLE)
-    set_current_account(db, ana.id)
-
-    with pytest.raises(ProgrammingError, match="row-level security"):
-        db.execute(update(Account).where(Account.id == ana.id).values(id=luis.id))
-
-
 def test_an_account_cannot_insert_rows_for_another(db: Session) -> None:
     user = AuthUser(email="eva@example.com")
     db.add(user)
@@ -154,6 +143,34 @@ def test_the_signed_in_user_cannot_create_an_account_for_another_user(db: Sessio
     )
     with pytest.raises(ProgrammingError, match="row-level security"):
         db.flush()
+
+
+@pytest.mark.parametrize("column", ["id", "auth_user_id"])
+def test_an_account_cannot_change_its_identity(
+    db: Session, two_accounts: tuple[Account, Account], column: str
+) -> None:
+    ana, _ = two_accounts
+    other_user = AuthUser(email="otro@example.com")
+    db.add(other_user)
+    db.flush()
+    # Moving to another account's id or user: the trigger refuses before RLS is checked.
+    new_value = uuid.uuid4() if column == "id" else other_user.id
+    _as_role(db, PLATFORM_ROLE)
+    set_current_account(db, ana.id)
+
+    with pytest.raises(IntegrityError, match="cannot change its id or auth user"):
+        db.execute(update(Account).where(Account.id == ana.id).values({column: new_value}))
+
+
+def test_setting_the_account_ends_the_sign_in_lookup(
+    db: Session, two_accounts: tuple[Account, Account]
+) -> None:
+    ana, luis = two_accounts
+    _as_role(db, PLATFORM_ROLE)
+    set_current_user(db, ana.auth_user_id)
+    set_current_account(db, luis.id)
+
+    assert _visible_account_ids(db) == {luis.id}
 
 
 # Identity per transaction
@@ -245,6 +262,22 @@ def test_a_new_auth_table_is_not_readable_by_the_agent(db: Session) -> None:
 
     assert _has_privilege(db, PLATFORM_ROLE, "auth.privileges_probe", "INSERT")
     assert not _has_privilege(db, AGENT_ROLE, "auth.privileges_probe", "SELECT")
+
+
+def test_a_new_function_is_executable_only_once_granted(db: Session) -> None:
+    _as_role(db, MIGRATOR_ROLE)
+    db.execute(
+        text("CREATE FUNCTION agent.privileges_probe() RETURNS int LANGUAGE sql AS 'SELECT 1'")
+    )
+    db.execute(text("RESET ROLE"))
+    probe = "agent.privileges_probe()"
+
+    for role in (PLATFORM_ROLE, AGENT_ROLE):
+        assert not db.scalar(select(func.has_function_privilege(role, probe, "EXECUTE"))), role
+
+    db.execute(text(f"GRANT EXECUTE ON FUNCTION {probe} TO {AGENT_ROLE}"))
+    assert db.scalar(select(func.has_function_privilege(AGENT_ROLE, probe, "EXECUTE")))
+    assert not db.scalar(select(func.has_function_privilege(PLATFORM_ROLE, probe, "EXECUTE")))
 
 
 def test_agent_has_no_access_to_storage_billing_or_operations(db: Session) -> None:

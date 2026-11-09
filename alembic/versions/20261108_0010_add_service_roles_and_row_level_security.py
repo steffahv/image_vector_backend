@@ -11,7 +11,11 @@ go in the repo) as members of them: see scripts/create_login_roles.sql and docs/
 
 Row-level security on platform.accounts: a session sees the account it acts for, or the account
 of the signed-in user. The second case is how sign-in finds or creates the account before its id
-is known.
+is known. A trigger keeps an account's id and auth user fixed, so no account can take the place
+of another.
+
+Functions the migrator creates later are not executable by anyone until a migration grants them:
+the credit functions (VEC-41) will skip RLS on purpose, so only the roles named may call them.
 
 Revision ID: 0010
 Revises: 0009
@@ -128,6 +132,11 @@ def _grant_schema_privileges() -> None:
     op.execute(f"GRANT USAGE ON SCHEMA auth TO {AGENT}")
     for table in AGENT_AUTH_TABLES:
         op.execute(f"GRANT SELECT ON auth.{table} TO {AGENT}")
+    # PostgreSQL lets everyone (PUBLIC) execute a new function. Not for the migrator's: each one
+    # gets GRANT EXECUTE to the roles that need it, in the migration that creates it.
+    op.execute(
+        f"ALTER DEFAULT PRIVILEGES FOR ROLE {MIGRATOR} REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC"
+    )
 
 
 def _setting_function(name: str, setting: str) -> None:
@@ -165,6 +174,31 @@ def _enable_account_rls() -> None:
             )
         """
     )
+    # The policy lets an account update its own row; without this it could also change its id or
+    # point auth_user_id to another user, and take over that user's sign-in.
+    op.execute(
+        """
+        CREATE FUNCTION platform.accounts_keep_identity() RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+            IF NEW.id <> OLD.id OR NEW.auth_user_id <> OLD.auth_user_id THEN
+                RAISE EXCEPTION 'an account cannot change its id or auth user'
+                    USING ERRCODE = 'check_violation';
+            END IF;
+            RETURN NEW;
+        END
+        $$
+        """
+    )
+    op.execute(f"ALTER FUNCTION platform.accounts_keep_identity() OWNER TO {MIGRATOR}")
+    op.execute(
+        """
+        CREATE TRIGGER accounts_keep_identity
+            BEFORE UPDATE OF id, auth_user_id ON platform.accounts
+            FOR EACH ROW EXECUTE FUNCTION platform.accounts_keep_identity()
+        """
+    )
 
 
 def upgrade() -> None:
@@ -178,6 +212,8 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    op.execute("DROP TRIGGER IF EXISTS accounts_keep_identity ON platform.accounts")
+    op.execute("DROP FUNCTION IF EXISTS platform.accounts_keep_identity()")
     op.execute("DROP POLICY account_isolation ON platform.accounts")
     op.execute("ALTER TABLE platform.accounts NO FORCE ROW LEVEL SECURITY")
     op.execute("ALTER TABLE platform.accounts DISABLE ROW LEVEL SECURITY")
