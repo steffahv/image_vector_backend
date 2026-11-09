@@ -1,4 +1,4 @@
--- Creates one login user per service, each a member of its group role (created by migration 0004).
+-- Creates one login user per service, each a member of its group role (created by migration 0010).
 -- Run it after `alembic upgrade head`, as a user that can create roles (e.g. postgres).
 -- Passwords are passed on the command line and never saved in the repo:
 --

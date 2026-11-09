@@ -215,7 +215,7 @@ CREATE TABLE platform.folders (
 
 La plataforma (este repo) y el agente (TypeScript) comparten la base. Cada uno entra con su propio
 usuario y solo con los permisos que necesita, y PostgreSQL filtra las filas por la cuenta conectada.
-Así la protección no depende solo de que cada consulta esté bien escrita. Lo crea la migración `0004`.
+Así la protección no depende solo de que cada consulta esté bien escrita. Lo crea la migración `0010`.
 
 ### Qué rol accede a qué esquema
 
@@ -270,7 +270,7 @@ Las tablas de `auth` no tienen RLS: se consultan antes de saber qué cuenta es (
 ### Política de una tabla nueva
 
 Toda tabla con datos de una cuenta lleva su política, en la **misma migración** que la crea. Autogenerate no
-la detecta: se agrega a mano debajo de `op.create_table(...)`. El modelo es `platform.accounts` (migración `0004`).
+la detecta: se agrega a mano debajo de `op.create_table(...)`. El modelo es `platform.accounts` (migración `0010`).
 
 Si la tabla tiene `account_id`:
 

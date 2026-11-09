@@ -32,7 +32,7 @@ def run_migrations_offline() -> None:
 def become_migrator(connection: Connection) -> None:
     """Run as the migrator so every table it creates has the same owner.
 
-    Only once migration 0004 has handed this database to the migrator: before that the role may
+    Only once migration 0010 has handed this database to the migrator: before that the role may
     not exist yet, or exist (created for another database on the server) and own nothing here.
     Fails if the connected user is not a member of the migrator role.
     """

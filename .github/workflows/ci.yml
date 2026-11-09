@@ -21,7 +21,7 @@ jobs:
           --health-cmd "pg_isready -U ci -d image_vector_ci"
           --health-interval 5s --health-timeout 5s --health-retries 10
     env:
-      # Superuser: runs the first migrations (0004 creates the roles) and the tests, which switch
+      # Superuser: runs the first migrations (0010 creates the roles) and the tests, which switch
       # to each service role with SET ROLE.
       DATABASE_URL: postgresql+psycopg://ci:ci@localhost:5432/image_vector_ci
       # Throwaway passwords for the CI database only.

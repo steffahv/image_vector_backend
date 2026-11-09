@@ -99,7 +99,7 @@ uvicorn app.main:app --reload
 
 ## Roles en tu base local
 
-La migración `0004` crea los roles `vectoredit_migrator`, `vectoredit_platform` y `vectoredit_agent`
+La migración `0010` crea los roles `vectoredit_migrator`, `vectoredit_platform` y `vectoredit_agent`
 (qué puede cada uno: [base-de-datos.md](base-de-datos.md#roles-y-seguridad-por-fila)). Así que con
 `alembic upgrade head` ya los tienes. Son roles **sin login**; si quieres entrar con ellos, crea un usuario
 con contraseña por cada uno (elige tus contraseñas, no se guardan en ningún lado del repo):
@@ -126,7 +126,7 @@ Para el día a día puedes seguir con tu superusuario en `DATABASE_URL`, pero te
   necesitando el migrador o tu superusuario).
 - Las pruebas de `tests/test_database_security.py` cambian de rol con `SET ROLE`, así que necesitan que
   `DATABASE_URL` sea un superusuario (o miembro de los tres roles).
-- La migración `0004` la corre un usuario que pueda crear roles (tu superusuario). Después, las migraciones
+- La migración `0010` la corre un usuario que pueda crear roles (tu superusuario). Después, las migraciones
   se pueden correr con `vectoredit_migrator_login`.
 - Los roles son de todo el servidor PostgreSQL, no de una base: si tienes varias bases locales, las comparten.
 

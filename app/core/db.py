@@ -5,7 +5,7 @@ What goes here:
 - `get_db()`, the FastAPI dependency that opens one session per request.
 - `set_current_account()`, which tells PostgreSQL which account the session acts for, so the
   row-level security policies filter every query by it.
-- The names of the database roles (created by migration 0004).
+- The names of the database roles (created by migration 0010).
 
 What does not go here: the model base and mixins (core/model_base.py), tables (each module's
 models/) or queries (each module's service/).

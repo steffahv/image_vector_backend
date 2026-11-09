@@ -1,4 +1,4 @@
-"""Service roles, per-schema privileges and row-level security (migration 0004).
+"""Service roles, per-schema privileges and row-level security (migration 0010).
 
 PostgreSQL skips RLS for superusers, and tests usually connect as one. So each test switches to
 the role it checks with SET LOCAL ROLE, which also ends with the test's rolled-back transaction.

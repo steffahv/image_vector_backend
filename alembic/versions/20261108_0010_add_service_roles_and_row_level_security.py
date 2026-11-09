@@ -8,8 +8,8 @@ go in the repo) as members of them: see scripts/create_login_roles.sql and docs/
 - vectoredit_platform: the Python platform. Reads and writes its schemas.
 - vectoredit_agent: the TypeScript agent. Reads auth and platform, writes only agent.
 
-Revision ID: 0004
-Revises: 0003
+Revision ID: 0010
+Revises: 0009
 Create Date: 2026-11-08
 """
 
@@ -17,8 +17,8 @@ from collections.abc import Sequence
 
 from alembic import op
 
-revision: str = "0004"
-down_revision: str | None = "0003"
+revision: str = "0010"
+down_revision: str | None = "0009"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
@@ -86,11 +86,19 @@ def _give_existing_objects_to_migrator() -> None:
             LOOP
                 EXECUTE format('ALTER TABLE %I.%I OWNER TO {MIGRATOR}', t.schemaname, t.tablename);
             END LOOP;
+            FOR t IN SELECT p.oid::regprocedure AS signature FROM pg_proc p
+                     JOIN pg_namespace n ON n.oid = p.pronamespace
+                     WHERE n.nspname IN ({schema_list})
+            LOOP
+                EXECUTE format('ALTER ROUTINE %s OWNER TO {MIGRATOR}', t.signature);
+            END LOOP;
         END
         $$
         """
     )
     op.execute(f"ALTER TABLE public.alembic_version OWNER TO {MIGRATOR}")
+    # Created by migration 0004 for PostgreSQL 17 and older; later migrations may replace it.
+    op.execute(f"ALTER FUNCTION public.uuidv7() OWNER TO {MIGRATOR}")
 
 
 def _grant_schema_privileges() -> None:
