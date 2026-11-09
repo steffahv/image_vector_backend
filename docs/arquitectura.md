@@ -37,7 +37,7 @@ El código se ordena por tema del negocio, no por tipo de archivo. Cada tema es 
 |---|---|---|
 | `core/` | Lo común a todos: configuración (`config.py`), conexión a la base (`db.py`), base y columnas comunes de las tablas (`model_base.py`), registro de modelos para Alembic (`models_registry.py`) y metadatos de Swagger (`openapi.py`). | VEC-3, VEC-29 |
 | `health/` | `GET /api/v1/health` responde `{"status": "ok"}`. Sirve para comprobar que el servidor está vivo. | VEC-3 |
-| `auth/` | Registro, inicio de sesión (correo y Google) y sesión con cookie. Expone `get_current_user` para que los demás módulos sepan quién llama. El agente valida la sesión que emite este módulo. | VEC-4, VEC-40 |
+| `auth/` | Inicio de sesión (enlace por correo y Google) y sesión con cookie; la primera vez crea la cuenta. Expone `get_current_user` para que los demás módulos sepan quién llama. El agente valida la sesión que emite este módulo. | VEC-4, VEC-40 |
 | `documents/` | La ficha de cada documento y sus permisos: crear, abrir, guardar sin perder ni pisar cambios, versiones, carpetas, papelera y compartir. | VEC-29, 31, 42, 43 |
 | `storage/` | Los bytes: cliente S3, URLs firmadas, validación de lo subido y cuotas de espacio. Es el único módulo que habla con S3. | VEC-29, 31, 42 |
 | `billing/` | Planes, pagos, suscripciones y créditos que reserva el agente. Llega después del lanzamiento. | VEC-33, VEC-41 |
@@ -63,13 +63,13 @@ app/auth/
 ├── __init__.py
 ├── router/              # rutas HTTP
 │   ├── __init__.py      # crea el router del módulo e incluye los de cada archivo
-│   └── sign_in.py       # un archivo por grupo de rutas
+│   └── sessions.py      # un archivo por grupo de rutas
 ├── schemas/             # entrada y salida (Pydantic)
 │   ├── __init__.py
 │   └── session.py       # un archivo por tema
 ├── service/             # lógica de negocio
 │   ├── __init__.py
-│   └── email_link.py    # un archivo por caso de uso
+│   └── email_links.py   # un archivo por caso de uso
 └── models/              # tablas
     ├── __init__.py      # importa todas las tablas del módulo
     ├── user.py          # un archivo por tabla
@@ -114,7 +114,72 @@ navegador ─HTTP─> router/ ─> service/ ─> models/ ─> PostgreSQL
 
 Más tarde, `jobs/` libera el cupo si el guardado se cortó a la mitad y borra los archivos que quedaron sin uso.
 
+## Inicio de sesión y sesiones (VEC-4)
+
+Dos formas de entrar, las dos sin contraseña. La primera vez se crean el usuario (`auth.users`) y su cuenta
+(`platform.accounts`). Sesiones, enlaces y usuarios son código propio; Authlib solo hace el ida y vuelta con
+Google (VEC-40).
+
+| Ruta (`/api/v1/auth/...`) | Qué hace |
+|---|---|
+| `POST /email-links` | Manda un enlace de un solo uso que vence en 15 minutos. Responde lo mismo exista o no el correo. Máximo 3 por correo cada 15 minutos (429). |
+| `POST /email-links/preview` | Dice de qué correo es un enlace **sin gastarlo**, para que el editor pida confirmación. Un enlace que no serviría para entrar responde 400. |
+| `POST /sessions` | Recibe el `token` del enlace, lo gasta y crea la sesión (cookie). Un enlace usado, vencido o de otro propósito responde 400. Si el navegador ya tenía una sesión, la cierra. |
+| `GET /sessions/current` | Quién está conectado. Sin sesión, 401. |
+| `DELETE /sessions/current` | Cierra la sesión en la base y borra la cookie. |
+| `DELETE /sessions` | Cierra todas las sesiones del usuario, en todos sus dispositivos. |
+| `GET /google` | Redirige a Google. Se abre en el navegador, no con `fetch`. |
+| `GET /google/callback` | Google vuelve aquí. Crea la sesión y redirige a `FRONTEND_URL`; si algo falla, a `FRONTEND_URL/sign-in?error=google`. |
+
+**Enlace por correo.** El enlace es `FRONTEND_URL/sign-in/email#token=<token>`. El token va después de `#`
+para que el navegador no lo mande a ningún servidor ni en el `Referer`. Esa página del editor manda el token
+con `POST /sessions`: gastar el enlace cambia datos, así que no es un `GET`, y los antivirus de correo que
+abren los enlaces no lo gastan.
+
+**Google.** Flujo con código de autorización, PKCE y `state`, guardados en la cookie `vectoredit_google`
+(10 minutos). Si Google no confirma que el correo está verificado, no se une a un usuario existente. Una
+cuenta de Google ya enlazada entra aunque su correo haya cambiado.
+
+**La sesión.** Cookie `vectoredit_session`, `HttpOnly`, `Secure` y `SameSite=Lax`. Vence tras 30 días sin
+usarla; mientras se usa no vence nunca. En la base solo se guarda el SHA-256 del token. Volver a iniciar
+sesión (con correo o Google) cierra la sesión que el navegador tenía.
+
+**Renovación con rotación.** Si la sesión se usa más de una hora después de su última renovación, se alarga
+otros 30 días **y se cambia el token**: la respuesta trae la cookie nueva y todas las pestañas del navegador
+la usan enseguida (comparten cookies). El token anterior se sigue aceptando **2 minutos**, para las peticiones
+que ya iban en camino. Si aparece después, la cookie fue copiada: solo una de las copias recibió el token
+nuevo. Entonces la plataforma cierra la sesión: quien tenga la copia queda fuera y el usuario vuelve a
+entrar. Si la respuesta con la cookie nueva se pierde (un corte de red justo en ese momento), pasa lo mismo:
+el usuario vuelve a entrar. Es raro y falla del lado seguro. La cookie nueva la añade
+`SessionCookieMiddleware` a cualquier respuesta, también si la ruta termina en error (404, 403, 500...) o
+devuelve su propia respuesta.
+
+**Peticiones de otros sitios (CSRF).** Toda petición `POST`, `PUT`, `PATCH` o `DELETE` debe traer un `Origin`
+igual a `FRONTEND_URL` o `API_URL`; si no, 403 (`app/core/origin_check.py`). CORS solo permite al editor, con
+credenciales.
+
+**Para el editor.** Llamar a la API con `credentials: "include"`. Páginas que necesita:
+
+- `/sign-in/email`: lee el token del `#`, lo borra de la barra con `history.replaceState` (así no queda en el
+  historial ni se comparte copiando la URL), llama a `POST /email-links/preview` y pregunta «¿Entrar como
+  ana@example.com?». Solo si el usuario confirma, hace `POST /sessions`. Sin esa confirmación, alguien
+  podría mandar un enlace de **su** cuenta y el usuario entraría en ella sin darse cuenta, guardando ahí su
+  trabajo.
+- `/sign-in`: muestra el error de Google con `?error=google`.
+
+**Para el agente.** Reconoce la misma cookie: calcula el SHA-256 del valor de `vectoredit_session` y llama a
+`auth.find_session(<hash>)`, que devuelve `session_id`, `user_id` e `is_previous_token` (o nada si no vale).
+No debe consultar `auth.sessions` a mano: la función es el único lugar con la regla (vencimiento, token
+anterior y margen de 2 minutos), y la plataforma usa la misma. El agente no renueva ni rota: solo lee. Su
+rol puede leer `auth.sessions` y `auth.users`, nada más de `auth`. Para recibir la cookie, el agente debe servirse en el mismo host que la API
+o, si está en otro subdominio, `SESSION_COOKIE_DOMAIN` debe ser el dominio padre.
+
+**Para los demás módulos.** Una ruta que necesita sesión declara `Depends(get_current_user)`
+(`from app.auth.service import get_current_user`). Devuelve el usuario y su cuenta, y deja la sesión de la
+base actuando por esa cuenta (`set_current_account`), así la seguridad por fila filtra todo lo demás.
+
 ## Referencias
 
 - `Arquitectura_VectorEdit` y `Modelo_relacional_VectorEdit` (adjuntos en Jira, Epic VEC-28).
-- Decisiones pendientes: librería de identidad en Python y contrato con el agente (VEC-40).
+- Decisiones de identidad (VEC-40): Authlib solo para Google; sesiones y enlaces propios. Pendiente: el
+  proveedor de correo.

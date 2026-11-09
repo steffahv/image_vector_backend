@@ -16,6 +16,11 @@ strict = true
 plugins = ["pydantic.mypy"]
 files = ["app"]
 
+# Authlib ships no type hints. Only app/auth/service/google.py imports it.
+[[tool.mypy.overrides]]
+module = ["authlib.*"]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 

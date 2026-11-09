@@ -47,6 +47,9 @@ Columnas que se repiten en muchas tablas:
 Si una tabla tuya apunta a una de estas, usa estos nombres. **Todas existen:**
 
 - Migración `0003`: `auth.users`, `auth.accounts`, `auth.sessions`, `auth.verifications` y `platform.accounts`.
+- Migración `0011`: rotación del token de sesión (`auth.sessions.previous_token_hash` y `rotated_at`) y la
+  función `auth.find_session(token_hash)`, con la que la plataforma y el agente validan la cookie
+  ([arquitectura.md](arquitectura.md#inicio-de-sesión-y-sesiones-vec-4)).
 - Migración `0005`: `platform.workspaces`, `platform.folders`, `platform.documents`, `platform.document_revisions`,
   `platform.document_versions` y `storage.objects`.
 - Migración `0006`: `platform.revision_images`, `platform.share_links`, `storage.saves`, `storage.uploads`,
@@ -233,8 +236,8 @@ Así la protección no depende solo de que cada consulta esté bien escrita. Lo 
   de migrar, así toda tabla nueva tiene el mismo dueño.
 - **`vectoredit_platform`** es la app de este repo.
 - **`vectoredit_agent`** es el agente. Créditos y cupos los cambia solo con funciones SQL autorizadas (VEC-41).
-  En `auth` solo lee `users` y `sessions`, lo justo para validar la sesión: nunca ve contraseñas ni enlaces
-  de correo. Si el agente necesita otra tabla de `auth`, se le da en una migración nueva, tabla por tabla.
+  En `auth` solo lee `users` y `sessions`, lo justo para validar la sesión con `auth.find_session()`: nunca ve
+  contraseñas ni enlaces de correo. Si el agente necesita otra tabla de `auth`, se le da en una migración nueva, tabla por tabla.
 
 Los tres son roles de grupo **sin login**. En cada entorno se crea un usuario con contraseña por servicio
 (`vectoredit_<rol>_login`), miembro de su rol, con `scripts/create_login_roles.sql`. Las contraseñas nunca van

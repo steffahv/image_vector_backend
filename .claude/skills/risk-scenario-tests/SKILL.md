@@ -15,7 +15,7 @@ protection. Model: `tests/test_database_security.py`.
    write the case a user or attacker would hit: two accounts, one tries to read, change, delete or take over
    the other's rows.
 2. **Never test security as a superuser.** Superusers skip RLS, so a test run as one passes for the wrong
-   reason. Switch roles inside the test transaction with `SET LOCAL ROLE` (helper `_as_role`), and say why
+   reason. Switch roles inside the test transaction with `SET LOCAL ROLE` (helper `as_role` in `tests/conftest.py`), and say why
    in the module docstring.
 3. **Repeat the scenario for every role it applies to.** Use `pytest.mark.parametrize` over
    `PLATFORM_ROLE`, `AGENT_ROLE` and `MIGRATOR_ROLE`: a policy that works for one role and not another is a
@@ -44,7 +44,7 @@ Two accounts and a restricted role:
 @pytest.mark.parametrize("role", [PLATFORM_ROLE, AGENT_ROLE, MIGRATOR_ROLE])
 def test_each_account_sees_only_itself(db, two_accounts, role):
     ana, luis = two_accounts  # created as the test user, before switching role
-    _as_role(db, role)
+    as_role(db, role)
     set_current_account(db, ana.id)
     assert _visible_account_ids(db) == {ana.id}
 ```
@@ -59,7 +59,7 @@ assert updated.rowcount == 0
 Future objects get the right privileges:
 
 ```python
-_as_role(db, MIGRATOR_ROLE)
+as_role(db, MIGRATOR_ROLE)
 db.execute(text("CREATE TABLE platform.privileges_probe (id int)"))
 db.execute(text("RESET ROLE"))
 assert not _has_privilege(db, AGENT_ROLE, "platform.privileges_probe", "INSERT")
@@ -76,6 +76,6 @@ assert not _has_privilege(db, AGENT_ROLE, "platform.privileges_probe", "INSERT")
 
 ## Reuse
 
-`_as_role`, `two_accounts`, `_visible_account_ids` and `_has_privilege` live in
+`as_role` lives in `tests/conftest.py`; `two_accounts`, `_visible_account_ids` and `_has_privilege` live in
 `tests/test_database_security.py`. When a second test file needs them, move them to `tests/conftest.py` or
 `tests/factories.py` instead of copying them. Build rows with `tests/factories.py`.

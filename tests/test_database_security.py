@@ -28,14 +28,11 @@ from app.core.db import (
     set_current_user,
 )
 from app.documents.models import Account, AgentMode
+from tests.conftest import as_role
 
 SCHEMAS = ("auth", "platform", "storage", "billing", "agent", "operations")
 AGENT_AUTH_TABLES = ("auth.users", "auth.sessions")
 AGENT_NO_ACCESS = ("storage", "billing", "operations")
-
-
-def _as_role(db: Session, role: str) -> None:
-    db.execute(text(f"SET LOCAL ROLE {role}"))
 
 
 def _account(db: Session, email: str) -> Account:
@@ -72,7 +69,7 @@ def test_each_account_sees_only_itself(
     db: Session, two_accounts: tuple[Account, Account], role: str
 ) -> None:
     ana, luis = two_accounts
-    _as_role(db, role)
+    as_role(db, role)
 
     set_current_account(db, ana.id)
     assert _visible_account_ids(db) == {ana.id}
@@ -84,7 +81,7 @@ def test_each_account_sees_only_itself(
 def test_without_an_account_no_rows_are_visible(
     db: Session, two_accounts: tuple[Account, Account]
 ) -> None:
-    _as_role(db, PLATFORM_ROLE)
+    as_role(db, PLATFORM_ROLE)
     assert _visible_account_ids(db) == set()
 
 
@@ -92,7 +89,7 @@ def test_an_account_cannot_change_or_delete_another(
     db: Session, two_accounts: tuple[Account, Account]
 ) -> None:
     ana, luis = two_accounts
-    _as_role(db, PLATFORM_ROLE)
+    as_role(db, PLATFORM_ROLE)
     set_current_account(db, ana.id)
 
     updated = db.execute(update(Account).where(Account.id == luis.id).values(name="hacked"))
@@ -106,7 +103,7 @@ def test_an_account_cannot_insert_rows_for_another(db: Session) -> None:
     user = AuthUser(email="eva@example.com")
     db.add(user)
     db.flush()
-    _as_role(db, PLATFORM_ROLE)
+    as_role(db, PLATFORM_ROLE)
     set_current_account(db, uuid.uuid4())
 
     db.add(Account(auth_user_id=user.id, name="Eva", language="es", agent_mode=AgentMode.PLATFORM))
@@ -118,7 +115,7 @@ def test_sign_in_finds_the_account_of_the_signed_in_user(
     db: Session, two_accounts: tuple[Account, Account]
 ) -> None:
     ana, _ = two_accounts
-    _as_role(db, PLATFORM_ROLE)
+    as_role(db, PLATFORM_ROLE)
     set_current_user(db, ana.auth_user_id)
 
     assert _visible_account_ids(db) == {ana.id}
@@ -128,7 +125,7 @@ def test_sign_in_creates_the_account_the_first_time(db: Session) -> None:
     user = AuthUser(email="eva@example.com")
     db.add(user)
     db.flush()
-    _as_role(db, PLATFORM_ROLE)
+    as_role(db, PLATFORM_ROLE)
     set_current_user(db, user.id)
 
     db.add(Account(auth_user_id=user.id, name="Eva", language="es", agent_mode=AgentMode.PLATFORM))
@@ -139,7 +136,7 @@ def test_the_signed_in_user_cannot_create_an_account_for_another_user(db: Sessio
     eva, other = AuthUser(email="eva@example.com"), AuthUser(email="otro@example.com")
     db.add_all([eva, other])
     db.flush()
-    _as_role(db, PLATFORM_ROLE)
+    as_role(db, PLATFORM_ROLE)
     set_current_user(db, eva.id)
 
     db.add(
@@ -159,7 +156,7 @@ def test_an_account_cannot_change_its_identity(
     db.flush()
     # Moving to another account's id or user: the trigger refuses before RLS is checked.
     new_value = uuid.uuid4() if column == "id" else other_user.id
-    _as_role(db, PLATFORM_ROLE)
+    as_role(db, PLATFORM_ROLE)
     set_current_account(db, ana.id)
 
     with pytest.raises(IntegrityError, match="cannot change its id or auth user"):
@@ -170,7 +167,7 @@ def test_setting_the_account_ends_the_sign_in_lookup(
     db: Session, two_accounts: tuple[Account, Account]
 ) -> None:
     ana, luis = two_accounts
-    _as_role(db, PLATFORM_ROLE)
+    as_role(db, PLATFORM_ROLE)
     set_current_user(db, ana.auth_user_id)
     set_current_account(db, luis.id)
 
@@ -258,7 +255,7 @@ def test_the_app_refuses_a_user_that_skips_rls_or_is_not_the_platform(
 ) -> None:
     # None: the test user itself, a superuser.
     if role is not None:
-        _as_role(db, role)
+        as_role(db, role)
     with pytest.raises(RuntimeError, match="DATABASE_URL must be"):
         check_app_role(db.connection())
 
@@ -273,7 +270,7 @@ def test_the_app_does_not_start_in_production_as_a_superuser(
 
 
 def test_the_app_accepts_the_platform_role(db: Session) -> None:
-    _as_role(db, PLATFORM_ROLE)
+    as_role(db, PLATFORM_ROLE)
     check_app_role(db.connection())
 
 
@@ -312,7 +309,7 @@ def test_agent_write_is_refused_by_the_database(
     db: Session, two_accounts: tuple[Account, Account]
 ) -> None:
     ana, _ = two_accounts
-    _as_role(db, AGENT_ROLE)
+    as_role(db, AGENT_ROLE)
     set_current_account(db, ana.id)
 
     with pytest.raises(ProgrammingError, match="permission denied"):
@@ -328,7 +325,7 @@ def test_agent_reads_only_users_and_sessions_in_auth(db: Session) -> None:
 
 
 def test_a_new_auth_table_is_not_readable_by_the_agent(db: Session) -> None:
-    _as_role(db, MIGRATOR_ROLE)
+    as_role(db, MIGRATOR_ROLE)
     db.execute(text("CREATE TABLE auth.privileges_probe (id int)"))
     db.execute(text("RESET ROLE"))
 
@@ -337,7 +334,7 @@ def test_a_new_auth_table_is_not_readable_by_the_agent(db: Session) -> None:
 
 
 def test_a_new_function_is_executable_only_once_granted(db: Session) -> None:
-    _as_role(db, MIGRATOR_ROLE)
+    as_role(db, MIGRATOR_ROLE)
     db.execute(
         text("CREATE FUNCTION agent.privileges_probe() RETURNS int LANGUAGE sql AS 'SELECT 1'")
     )
@@ -382,7 +379,7 @@ def test_every_table_is_owned_by_the_migrator(db: Session) -> None:
 
 
 def test_a_new_table_gets_its_privileges_with_no_manual_step(db: Session) -> None:
-    _as_role(db, MIGRATOR_ROLE)
+    as_role(db, MIGRATOR_ROLE)
     db.execute(text("CREATE TABLE platform.privileges_probe (id int)"))
     db.execute(text("CREATE TABLE agent.privileges_probe (id int)"))
     db.execute(text("RESET ROLE"))

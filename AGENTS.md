@@ -58,7 +58,11 @@ Code, database names and comments in English; documentation in `docs/` in Spanis
 ### Sessions and requests
 
 - Session cookies are `HttpOnly`, `Secure` and `SameSite`. Actions that change data use `POST`/`PUT`/
-  `PATCH`/`DELETE`, never `GET`.
+  `PATCH`/`DELETE`, never `GET`. The one exception is the Google sign-in callback, which Google reaches
+  with a redirect; it is protected by its one-time `state` and PKCE verifier instead.
+- Requests that change data must come from one of our origins (`app/core/origin_check.py`). A route
+  exempted from it (e.g. a payment webhook) must authenticate the caller another way, such as a
+  signature.
 - Sign-in, password recovery and email links are rate limited.
 - Every endpoint states who may call it. By default, a new route requires a session.
 

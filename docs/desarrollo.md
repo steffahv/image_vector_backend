@@ -148,9 +148,35 @@ Todas se leen en `app/core/config.py`. `.env` nunca se sube al repo; `.env.examp
 |---|---|---|
 | `APP_ENV` | `development`, `staging` o `production`. En producción se ocultan Swagger y ReDoc. | `development` |
 | `DATABASE_URL` | Conexión a PostgreSQL. Usa el driver `psycopg`. En la nube, agrega `?sslmode=require`. | `postgresql+psycopg://user@localhost:5432/test_1` |
+| `FRONTEND_URL` | Dónde corre el editor. Solo él (y Swagger) puede mandar peticiones que cambian datos; los enlaces de correo apuntan aquí. | `http://localhost:5173` |
+| `API_URL` | Dónde corre esta API. Google vuelve a `<API_URL>/api/v1/auth/google/callback`. | `http://localhost:8000` |
+| `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | Inicio de sesión con Google. Opcionales en desarrollo (sin ellas, Google responde 503). | — |
+| `SESSION_COOKIE_DOMAIN` | Dominio de la cookie de sesión. Vacío en local; el dominio padre si el agente está en otro subdominio. | `vectoredit.com` |
 
-Si falta una variable obligatoria, la app no arranca y dice cuál falta.
+Si falta una variable obligatoria, la app no arranca y dice cuál falta. Fuera de desarrollo, además, son
+obligatorias las de Google y `FRONTEND_URL` y `API_URL` deben usar `https`.
 Las variables del almacenamiento S3 se agregan con `storage/` (VEC-42).
+
+## Iniciar sesión en local
+
+**Con enlace por correo.** Todavía no hay proveedor de correo (VEC-40): en desarrollo el enlace se escribe
+en la consola de `uvicorn`, con el correo enmascarado:
+
+```
+Sign-in link for a***@example.com (development only): http://localhost:5173/sign-in/email#token=...
+```
+
+Ábrelo con el editor corriendo, o copia el `token` y mándalo a `POST /api/v1/auth/sessions` desde Swagger.
+Fuera de desarrollo, pedir un enlace responde 503 hasta que se elija el proveedor.
+
+**Con Google.** Crea un cliente OAuth en Google Cloud Console (Credentials → OAuth client ID → Web
+application) con la URI de redirección `http://localhost:8000/api/v1/auth/google/callback`, y pon
+`GOOGLE_CLIENT_ID` y `GOOGLE_CLIENT_SECRET` en tu `.env`. Luego abre `http://localhost:8000/api/v1/auth/google`
+en el navegador.
+
+**Desde Swagger.** Abre `/docs` en `http://localhost:8000`, no en `127.0.0.1:8000`: las peticiones que
+cambian datos solo se aceptan desde `FRONTEND_URL` o `API_URL` (protección CSRF), y el navegador manda el
+origen tal como está escrito en la barra.
 
 ## Trabajar en equipo con la base
 
@@ -223,6 +249,6 @@ No dejan datos: cada una se deshace al terminar.
 
 | Archivo | Qué lleva |
 |---|---|
-| `requirements.txt` | Lo que corre en producción. |
-| `requirements-dev.txt` | Lo anterior + pytest, httpx, ruff y mypy. |
+| `requirements.txt` | Lo que corre en producción. Incluye `httpx2`, que usan Authlib para hablar con Google y el `TestClient` de las pruebas. |
+| `requirements-dev.txt` | Lo anterior + pytest, ruff y mypy. |
 | `pyproject.toml` | Configuración de ruff, mypy y pytest. |
