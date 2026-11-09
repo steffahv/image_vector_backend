@@ -1,6 +1,7 @@
 from collections.abc import Iterator
 
 import pytest
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.core.db import engine
@@ -20,3 +21,12 @@ def db() -> Iterator[Session]:
         finally:
             session.close()
             transaction.rollback()
+
+
+def as_role(db: Session, role: str) -> None:
+    """Act as a database role until the test transaction ends.
+
+    Tests connect as a superuser, which skips row-level security; switching role makes the
+    policies apply as they do for the service. `role` is one of the role constants in app.core.db.
+    """
+    db.execute(text(f"SET LOCAL ROLE {role}"))
