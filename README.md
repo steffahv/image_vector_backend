@@ -8,17 +8,61 @@ Los dos comparten la misma base PostgreSQL, cada uno con su propio rol.
 
 ## Arranque rápido
 
-Necesitas Python 3.11+ y PostgreSQL instalado. Cada persona usa su propia base local.
+Necesitas Python 3.11+ y PostgreSQL instalado. Cada persona usa **su propia base local**;
+lo que se comparte es el repo con sus migraciones.
+
+### 1. Crear tu base de datos (solo la primera vez)
+
+Alembic crea las tablas, pero **no crea la base**. Créala una vez con el nombre `test_1`.
+
+**Mac**
 
 ```bash
-createdb test_1                 # crea tu base (solo la primera vez)
-cp .env.example .env            # y pon tu DATABASE_URL
+brew install postgresql@17          # si no lo tienes
+brew services start postgresql@17
+createdb test_1
+```
+
+Tu `DATABASE_URL`: `postgresql+psycopg://<tu_usuario_de_mac>@localhost:5432/test_1`
+
+**Windows**
+
+1. Instala PostgreSQL desde https://www.postgresql.org/download/windows/
+   (marca **PostgreSQL Server**, **pgAdmin 4** y **Command Line Tools**; anota la contraseña de `postgres`).
+2. Crea la base, con una de estas dos formas:
+   - **pgAdmin:** Servers → PostgreSQL → clic derecho en **Databases** → **Create → Database…** → nombre `test_1` → **Save**.
+   - **PowerShell** (cambia `17` por tu versión):
+     ```powershell
+     & "C:\Program Files\PostgreSQL\17\bin\createdb.exe" -U postgres test_1
+     ```
+
+Tu `DATABASE_URL`: `postgresql+psycopg://postgres:<tu_contraseña>@localhost:5432/test_1`
+
+**Linux (Debian/Ubuntu)**
+
+```bash
+sudo apt install postgresql
+sudo -u postgres createuser --superuser $USER
+createdb test_1
+```
+
+Tu `DATABASE_URL`: `postgresql+psycopg://<tu_usuario>@localhost:5432/test_1`
+
+### 2. Configurar y arrancar
+
+```bash
+cp .env.example .env            # pon tu DATABASE_URL del paso 1
 python -m venv .venv
 source .venv/bin/activate       # Windows PowerShell: .\.venv\Scripts\Activate.ps1
 pip install -r requirements-dev.txt
-alembic upgrade head            # crea las tablas
+alembic upgrade head            # crea las tablas en tu base
 uvicorn app.main:app --reload
 ```
+
+Más detalle (contraseñas con caracteres especiales, cómo comprobar la base, reiniciarla):
+[docs/desarrollo.md](docs/desarrollo.md).
+
+### 3. Abrir
 
 - API: `http://127.0.0.1:8000/api/v1`
 - Swagger: `http://127.0.0.1:8000/docs`

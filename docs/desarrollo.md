@@ -25,15 +25,48 @@ DATABASE_URL=postgresql+psycopg://<tu_usuario>@localhost:5432/test_1
 
 **Windows**
 
-1. Descarga el instalador desde https://www.postgresql.org/download/windows/ e instálalo.
-   Anota la contraseña que pongas para el usuario `postgres`.
-2. Abre pgAdmin (viene con el instalador) y crea una base llamada `test_1`,
-   o en una terminal: `createdb -U postgres test_1`.
+1. Descarga el instalador desde https://www.postgresql.org/download/windows/ y ejecútalo.
+   - Deja marcados **PostgreSQL Server**, **pgAdmin 4** y **Command Line Tools**.
+   - Pon una contraseña para el usuario `postgres` y **anótala**: la vas a usar en `DATABASE_URL`.
+   - Deja el puerto en `5432`.
+2. Crea la base `test_1`. Elige una de estas dos formas:
+
+   **Con pgAdmin (visual)**
+   1. Abre pgAdmin 4.
+   2. En el panel izquierdo, abre **Servers → PostgreSQL** y escribe la contraseña de `postgres`.
+   3. Clic derecho en **Databases → Create → Database…**
+   4. En **Database** escribe `test_1` y pulsa **Save**.
+
+   **Con la terminal (PowerShell)**
+
+   El instalador no agrega los comandos de PostgreSQL al PATH, así que se usa la ruta completa
+   (cambia `17` por tu versión):
+
+   ```powershell
+   & "C:\Program Files\PostgreSQL\17\bin\createdb.exe" -U postgres test_1
+   ```
+
+   Te pedirá la contraseña de `postgres`.
 3. Tu `DATABASE_URL` queda así:
 
 ```
 DATABASE_URL=postgresql+psycopg://postgres:<tu_contraseña>@localhost:5432/test_1
 ```
+
+Si la contraseña tiene caracteres especiales (`@`, `:`, `/`, `#`), cámbialos por su código:
+`@` → `%40`, `:` → `%3A`, `/` → `%2F`, `#` → `%23`.
+
+**Comprobar que la base existe** (cualquier sistema):
+
+```bash
+psql -d test_1 -c "select 1"                     # Mac / Linux
+```
+
+```powershell
+& "C:\Program Files\PostgreSQL\17\bin\psql.exe" -U postgres -d test_1 -c "select 1"   # Windows
+```
+
+Si responde `1`, la base está lista.
 
 **Linux (Debian/Ubuntu)**
 
