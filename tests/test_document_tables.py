@@ -30,7 +30,7 @@ def test_an_account_has_only_one_personal_workspace(db: Session) -> None:
         db.flush()
 
 
-def test_folder_parent_must_be_in_the_samemake_workspace(db: Session) -> None:
+def test_folder_parent_must_be_in_the_same_workspace(db: Session) -> None:
     parent = Folder(workspace_id=make_workspace(db).id, name="Clients")
     db.add(parent)
     db.flush()
@@ -50,7 +50,7 @@ def test_folder_cannot_be_its_own_parent(db: Session) -> None:
         db.flush()
 
 
-def test_document_folder_must_be_in_the_samemake_workspace(db: Session) -> None:
+def test_document_folder_must_be_in_the_same_workspace(db: Session) -> None:
     folder = Folder(workspace_id=make_workspace(db).id, name="Clients")
     db.add(folder)
     db.flush()
@@ -65,7 +65,7 @@ def test_document_dimensions_must_be_positive_and_finite(db: Session, width: flo
         make_document(db, make_workspace(db), width=width)
 
 
-def test_only_drafts_may_have_no_currentmake_revision(db: Session) -> None:
+def test_only_drafts_may_have_no_current_revision(db: Session) -> None:
     with pytest.raises(IntegrityError, match="ck_documents_current_revision_required"):
         make_document(db, make_workspace(db), status=DocumentStatus.ACTIVE)
 
@@ -91,7 +91,7 @@ def test_current_revision_must_exist(db: Session) -> None:
         _check_deferred_keys(db)
 
 
-def test_revision_files_must_be_in_the_samemake_workspace(db: Session) -> None:
+def test_revision_files_must_be_in_the_same_workspace(db: Session) -> None:
     document = make_document(db, make_workspace(db))
     foreign_file = make_object(db, make_workspace(db))
 
@@ -101,7 +101,7 @@ def test_revision_files_must_be_in_the_samemake_workspace(db: Session) -> None:
         make_revision(db, document, foreign_file)
 
 
-def test_revision_numbers_are_positive_and_unique_permake_document(db: Session) -> None:
+def test_revision_numbers_are_positive_and_unique_per_document(db: Session) -> None:
     workspace = make_workspace(db)
     document = make_document(db, workspace)
     json_object = make_object(db, workspace)
@@ -115,7 +115,7 @@ def test_revision_numbers_are_positive_and_unique_permake_document(db: Session) 
         make_revision(db, document, json_object, revision=1)
 
 
-def test_version_must_point_to_an_existingmake_revision(db: Session) -> None:
+def test_version_must_point_to_an_existing_revision(db: Session) -> None:
     workspace = make_workspace(db)
     document = make_document(db, workspace)
     make_revision(db, document, make_object(db, workspace))
@@ -143,7 +143,7 @@ def test_object_hash_must_be_sha256(db: Session) -> None:
         make_object(db, make_workspace(db), sha256=b"short")
 
 
-def test_ready_images_are_stored_once_permake_workspace(db: Session) -> None:
+def test_ready_images_are_stored_once_per_workspace(db: Session) -> None:
     workspace = make_workspace(db)
     make_object(db, workspace, ObjectKind.IMAGE, content=b"same image")
 
