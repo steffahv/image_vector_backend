@@ -136,7 +136,8 @@ alembic current                                             # versión aplicada
 
 - Revisa siempre el archivo generado en `alembic/versions/` antes de aplicarlo: autogenerate no detecta todo
   (por ejemplo, cambios de nombre de columna o políticas de seguridad por fila).
-- Si creas un módulo nuevo con `models.py`, regístralo en `app/core/models_registry.py` o Alembic no verá sus tablas.
+- Cada tabla nueva se importa en el `models/__init__.py` de su módulo, y cada módulo nuevo con `models/` se registra
+  en `app/core/models_registry.py`. Si falta alguno de los dos, Alembic no ve la tabla.
 - Los nombres de índices y restricciones salen de `NAMING_CONVENTION` en `app/core/model_base.py`.
 
 ## Swagger
@@ -150,7 +151,7 @@ FastAPI genera la documentación de la API a partir del código.
 | `/api/v1/openapi.json` | El esquema OpenAPI. De aquí se generarán los tipos TypeScript para el editor y el agente. |
 
 - Los grupos de Swagger son los tags de `app/core/openapi.py`. Cada módulo tiene el suyo.
-- Para que una ruta quede bien documentada: `response_model`, un `summary` corto y `schemas.py` con tipos precisos.
+- Para que una ruta quede bien documentada: `response_model`, un `summary` corto y `schemas/` con tipos precisos.
 - Con `APP_ENV=production` las tres URLs responden 404.
 
 ## Pruebas y CI

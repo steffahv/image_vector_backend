@@ -52,40 +52,63 @@ El código se ordena por tema del negocio, no por tipo de archivo. Cada tema es 
 Storage no sabe nada de carpetas ni versiones; solo de archivos y cupos. Así, cambiar de proveedor de almacenamiento
 solo toca `storage/`.
 
-## Archivos de cada módulo
+## Carpetas de cada módulo
 
-| Archivo | Qué contiene | Qué no contiene |
+Cada módulo tiene una carpeta por capa, y dentro **un archivo por tema**. El `__init__.py` de cada carpeta
+importa lo público, así el resto del código importa siempre igual (`from app.auth.models import AuthUser`)
+aunque la carpeta crezca.
+
+```text
+app/auth/
+├── __init__.py
+├── router/              # rutas HTTP
+│   ├── __init__.py      # crea el router del módulo e incluye los de cada archivo
+│   └── sign_in.py       # un archivo por grupo de rutas
+├── schemas/             # entrada y salida (Pydantic)
+│   ├── __init__.py
+│   └── session.py       # un archivo por tema
+├── service/             # lógica de negocio
+│   ├── __init__.py
+│   └── email_link.py    # un archivo por caso de uso
+└── models/              # tablas
+    ├── __init__.py      # importa todas las tablas del módulo
+    ├── user.py          # un archivo por tabla
+    └── session.py
+```
+
+| Carpeta | Qué contiene | Qué no contiene |
 |---|---|---|
-| `router.py` | Rutas HTTP. Recibe la petición, la valida con `schemas.py` y llama a `service.py`. | Consultas a la base, reglas de negocio. |
-| `schemas.py` | Modelos Pydantic de entrada y salida. Es lo que aparece en Swagger. | Tablas. |
-| `service.py` | Lógica de negocio, permisos y transacciones. | Detalles HTTP (status, headers). |
-| `models.py` | Tablas SQLAlchemy del esquema del módulo. | Lógica. |
+| `router/` | Rutas HTTP. Recibe la petición, la valida con `schemas` y llama a `service`. | Consultas a la base, reglas de negocio. |
+| `schemas/` | Modelos Pydantic de entrada y salida. Es lo que aparece en Swagger. | Tablas. |
+| `service/` | Lógica de negocio, permisos y transacciones. | Detalles HTTP (status, headers). |
+| `models/` | Tablas SQLAlchemy del esquema del módulo. | Lógica. |
 
-`jobs/` solo tiene `service.py`, porque no recibe peticiones HTTP.
-Cada archivo empieza con un comentario que dice qué debe ir en él.
+`jobs/` solo tiene `service/` y `models/`, porque no recibe peticiones HTTP; `agent/` solo tiene `models/`.
+Cada `__init__.py` empieza con un comentario que dice qué va en esa carpeta y cómo dividirla.
+Ejemplos ya hechos: `app/auth/models/` (una tabla por archivo) y `app/health/router/` (rutas incluidas).
 
 ## Cómo se comunican
 
 ```text
-navegador ─HTTP─> router.py ─> service.py ─> models.py ─> PostgreSQL
+navegador ─HTTP─> router/ ─> service/ ─> models/ ─> PostgreSQL
                      │              │
-                schemas.py          └─> storage/service.py ─> almacenamiento S3
+                schemas/          └─> storage/service/ ─> almacenamiento S3
 ```
 
 1. El router no toca la base; llama al service.
-2. Un módulo usa a otro **a través de su `service.py`**, nunca leyendo sus tablas.
+2. Un módulo usa a otro **a través de su `service`** (`from app.storage.service import ...`), nunca leyendo sus tablas.
 3. Solo `storage/` habla con S3.
 4. Lo compartido va en `core/`.
 
 ## Ejemplo completo: guardar un documento
 
 1. El editor pide a `documents/` guardar una revisión nueva, con la revisión base y una clave de idempotencia.
-2. `documents/router.py` valida el cuerpo con `schemas.py` y llama a `documents/service.py`.
-3. `documents/service.py` usa `auth/service.py` para saber quién llama y comprueba que sea dueño.
-4. Pide a `storage/service.py` que reserve cupo y genere URLs firmadas.
+2. `documents/router/` valida el cuerpo con `documents/schemas/` y llama a `documents/service/`.
+3. `documents/service/` usa `auth/service/` para saber quién llama y comprueba que sea dueño.
+4. Pide a `storage/service/` que reserve cupo y genere URLs firmadas.
 5. El navegador sube los archivos directo al bucket con esas URLs.
-6. `storage/service.py` valida lo subido (tamaño, formato, hash) y lo mueve a claves definitivas.
-7. `documents/service.py` abre una transacción corta: bloquea cupo, documento y archivos en ese orden,
+6. `storage/service/` valida lo subido (tamaño, formato, hash) y lo mueve a claves definitivas.
+7. `documents/service/` abre una transacción corta: bloquea cupo, documento y archivos en ese orden,
    comprueba que nadie guardó otra revisión, crea la revisión nueva y la marca como actual.
 8. Si otro dispositivo guardó antes, responde **409** y no pisa nada.
 

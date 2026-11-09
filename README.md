@@ -85,7 +85,7 @@ alembic current                 # muestra en qué migración está tu base
 
 ### Crear una migración nueva
 
-1. Escribe o cambia la tabla en el `models.py` del módulo
+1. Escribe la tabla en su archivo dentro de `models/` del módulo e impórtala en `models/__init__.py`
    (cómo: [docs/base-de-datos.md](docs/base-de-datos.md)).
 2. Genera la migración comparando los modelos con tu base:
 
@@ -166,6 +166,19 @@ alembic/                 # Migraciones de la base
 tests/                   # Pruebas con pytest
 docs/                    # Documentación del proyecto
 ```
+
+Cada módulo tiene una carpeta por capa y un archivo por tema dentro:
+
+```text
+app/auth/
+├── router/      # rutas HTTP (un archivo por grupo de rutas)
+├── schemas/     # entrada y salida Pydantic (un archivo por tema)
+├── service/     # lógica de negocio (un archivo por caso de uso)
+└── models/      # tablas (un archivo por tabla)
+```
+
+Desde afuera se importa la carpeta (`from app.auth.models import AuthUser`); el `__init__.py` de cada
+carpeta reúne lo de sus archivos. Detalle en [docs/arquitectura.md](docs/arquitectura.md).
 
 ## Antes de abrir un PR
 

@@ -7,7 +7,7 @@ What goes here:
 - `text_enum()`, the column type for statuses and other closed lists of values.
 
 What does not go here: the engine or sessions (core/db.py) or concrete tables
-(each module's models.py).
+(each module's models/).
 This file must not read settings, so models can be imported without a database.
 """
 

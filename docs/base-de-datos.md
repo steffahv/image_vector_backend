@@ -9,12 +9,12 @@ Toda tabla vive en uno de estos esquemas, nunca en `public`. Los crea la migraci
 
 | Esquema | En el modelo relacional | Dónde van sus modelos | Tarea |
 |---|---|---|---|
-| `auth` | `auth` | `app/auth/models.py` | VEC-29 |
-| `platform` | `plataforma` | `app/documents/models.py` | VEC-29 |
-| `storage` | `almacenamiento` | `app/storage/models.py` | VEC-29 |
-| `billing` | `cobro` | `app/billing/models.py` | VEC-41 |
-| `agent` | `agente` | `app/agent/models.py` | VEC-41 |
-| `operations` | `operacion` | `app/jobs/models.py` | VEC-41 |
+| `auth` | `auth` | `app/auth/models/` | VEC-29 |
+| `platform` | `plataforma` | `app/documents/models/` | VEC-29 |
+| `storage` | `almacenamiento` | `app/storage/models/` | VEC-29 |
+| `billing` | `cobro` | `app/billing/models/` | VEC-41 |
+| `agent` | `agente` | `app/agent/models/` | VEC-41 |
+| `operations` | `operacion` | `app/jobs/models/` | VEC-41 |
 
 En el código se usan con `DbSchema` (`app/core/model_base.py`): `DbSchema.PLATFORM`, `DbSchema.BILLING`, etc.
 
@@ -95,6 +95,7 @@ Sin `\| None`, la columna es `NOT NULL`.
 ## Ejemplo
 
 `platform.folders`: carpeta dentro de un espacio, con carpeta padre opcional del **mismo** espacio.
+Iría en `app/documents/models/folder.py` y se importaría en `app/documents/models/__init__.py`.
 
 ```python
 import uuid
@@ -174,7 +175,8 @@ CREATE TABLE platform.folders (
 
 ## De modelo a migración
 
-1. Escribe o cambia el modelo en el `models.py` del módulo.
+1. Escribe la tabla en su propio archivo dentro de `models/` del módulo (por ejemplo `app/documents/models/folder.py`)
+   e impórtala en `models/__init__.py`. Si no se importa ahí, Alembic no la ve.
 2. `alembic revision --autogenerate -m "add platform folders"`.
 3. **Revisa el archivo generado** en `alembic/versions/`. Autogenerate no detecta todo: cambios de nombre,
    algunos CHECK, índices parciales ni políticas por fila.
