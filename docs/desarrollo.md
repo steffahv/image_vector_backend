@@ -74,7 +74,7 @@ Todas se leen en `app/core/config.py`. `.env` nunca se sube al repo; `.env.examp
 | `DATABASE_URL` | Conexión a PostgreSQL. Usa el driver `psycopg`. En la nube, agrega `?sslmode=require`. | `postgresql+psycopg://user@localhost:5432/test_1` |
 
 Si falta una variable obligatoria, la app no arranca y dice cuál falta.
-Las variables del almacenamiento (S3/R2) se agregan con `storage/` (VEC-42).
+Las variables del almacenamiento S3 se agregan con `storage/` (VEC-42).
 
 ## Trabajar en equipo con la base
 
@@ -86,11 +86,9 @@ Las variables del almacenamiento (S3/R2) se agregan con `storage/` (VEC-42).
 - Si dos ramas crean migraciones a la vez, Alembic avisa que hay dos «heads». Se resuelve en la segunda rama
   con `alembic merge heads -m "merge"` o cambiando su `down_revision` a la última de `main`.
 
-### Base compartida (staging, más adelante)
+### Entornos desplegados (más adelante)
 
-Habrá una sola base en la nube para staging (VEC-37). Solo la toca `main`: al unirse un PR, la CI corre
-`alembic upgrade head` contra ella. Sirve para que el editor y el agente prueben contra un backend real.
-Nadie desarrolla directamente sobre ella.
+Desarrollo, staging y producción tendrán bases separadas. Cómo se crean y cómo se migran se define en VEC-37.
 
 ## Migraciones (Alembic)
 

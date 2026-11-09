@@ -15,8 +15,7 @@ sus propias credenciales. **Las tablas y migraciones se definen solo aquí**, co
 El agente las lee con su rol y no migra nada.
 
 Los archivos pesados (el JSON del diseño y las imágenes) no van en la base: van a un bucket S3 privado.
-En producción será Cloudflare R2; el almacenamiento local se define con VEC-42. El navegador sube y baja
-archivos directo al bucket con URLs firmadas que caducan en 10 minutos como máximo.
+El navegador sube y baja archivos directo al bucket con URLs firmadas que caducan en 10 minutos como máximo.
 
 La base tendrá seis esquemas, definidos en `Modelo_relacional_VectorEdit`. Todavía no existen:
 los crean las migraciones de VEC-29 (`auth`, `plataforma`, `almacenamiento`) y VEC-41 (`cobro`, `agente`, `operacion`).
@@ -37,7 +36,7 @@ El código se ordena por tema del negocio, no por tipo de archivo. Cada tema es 
 | Módulo | Para qué sirve | Tareas |
 |---|---|---|
 | `core/` | Lo común a todos: configuración (`config.py`), conexión a la base (`db.py`), registro de modelos para Alembic (`models_registry.py`) y metadatos de Swagger (`openapi.py`). | VEC-3 |
-| `health/` | `GET /api/v1/health` responde `{"status": "ok"}`. El hosting lo consulta para saber si el servidor está vivo y reiniciarlo si no responde. | VEC-3 |
+| `health/` | `GET /api/v1/health` responde `{"status": "ok"}`. Sirve para comprobar que el servidor está vivo. | VEC-3 |
 | `auth/` | Registro, inicio de sesión (correo y Google) y sesión con cookie. Expone `get_current_user` para que los demás módulos sepan quién llama. El agente valida la sesión que emite este módulo. | VEC-4, VEC-40 |
 | `documents/` | La ficha de cada documento y sus permisos: crear, abrir, guardar sin perder ni pisar cambios, versiones, carpetas, papelera y compartir. | VEC-29, 31, 42, 43 |
 | `storage/` | Los bytes: cliente S3, URLs firmadas, validación de lo subido y cuotas de espacio. Es el único módulo que habla con S3. | VEC-29, 31, 42 |
@@ -69,7 +68,7 @@ Cada archivo empieza con un comentario que dice qué debe ir en él.
 ```text
 navegador ─HTTP─> router.py ─> service.py ─> models.py ─> PostgreSQL
                      │              │
-                schemas.py          └─> storage/service.py ─> S3 (R2)
+                schemas.py          └─> storage/service.py ─> almacenamiento S3
 ```
 
 1. El router no toca la base; llama al service.
@@ -79,7 +78,7 @@ navegador ─HTTP─> router.py ─> service.py ─> models.py ─> PostgreSQL
 
 ## Ejemplo completo: guardar un documento
 
-1. El editor llama a `POST /api/v1/documents/{id}/revisions` con la revisión base y una clave de idempotencia.
+1. El editor pide a `documents/` guardar una revisión nueva, con la revisión base y una clave de idempotencia.
 2. `documents/router.py` valida el cuerpo con `schemas.py` y llama a `documents/service.py`.
 3. `documents/service.py` usa `auth/service.py` para saber quién llama y comprueba que sea dueño.
 4. Pide a `storage/service.py` que reserve cupo y genere URLs firmadas.

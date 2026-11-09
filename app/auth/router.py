@@ -1,9 +1,10 @@
 """HTTP routes for auth.
 
 What goes here:
-- POST /auth/sign-up, POST /auth/sign-in, POST /auth/sign-out.
-- GET /auth/google and its callback.
-- GET /auth/session: who is signed in.
+- Sign up, sign in and sign out with email.
+- Google sign-in and its callback.
+- Reading the current session.
+Exact routes depend on the identity library (VEC-40).
 
 Rules:
 - Receive the request, validate it with schemas.py and call service.py. Nothing else.

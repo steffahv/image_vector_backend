@@ -1,7 +1,7 @@
 """Business logic for storage.
 
 What goes here:
-- The S3 client (Cloudflare R2 in production) and signed URLs (10 min max).
+- The S3-compatible client and signed URLs (10 min max).
 - Checking uploads (size, format, dimensions, hash) and moving them to immutable keys.
 - Quota reservation and release.
 
