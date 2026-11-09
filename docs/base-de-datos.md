@@ -205,10 +205,114 @@ CREATE TABLE platform.folders (
    e impórtala en `models/__init__.py`. Si no se importa ahí, Alembic no la ve.
 2. `alembic revision --autogenerate -m "add platform folders"`.
 3. **Revisa el archivo generado** en `alembic/versions/`. Autogenerate no detecta todo: cambios de nombre,
-   algunos CHECK, índices parciales ni políticas por fila.
+   algunos CHECK, índices parciales ni políticas por fila. Si la tabla tiene datos de una cuenta, agrégale su
+   política (ver [Política de una tabla nueva](#política-de-una-tabla-nueva)). Los permisos no hace falta tocarlos.
 4. `alembic upgrade head`, luego `alembic downgrade -1` y otra vez `alembic upgrade head`: la migración tiene que ir y volver.
    Al generarla, Alembic la formatea con ruff (`alembic.ini`), así pasa el lint de la CI.
 5. `alembic check` debe decir `No new upgrade operations detected`.
+
+## Roles y seguridad por fila
+
+La plataforma (este repo) y el agente (TypeScript) comparten la base. Cada uno entra con su propio
+usuario y solo con los permisos que necesita, y PostgreSQL filtra las filas por la cuenta conectada.
+Así la protección no depende solo de que cada consulta esté bien escrita. Lo crea la migración `0004`.
+
+### Qué rol accede a qué esquema
+
+| Esquema | `vectoredit_migrator` | `vectoredit_platform` | `vectoredit_agent` |
+|---|---|---|---|
+| `auth` | dueño | lee y escribe | lee |
+| `platform` | dueño | lee y escribe | lee |
+| `storage` | dueño | lee y escribe | — |
+| `billing` | dueño | lee y escribe | — |
+| `operations` | dueño | lee y escribe | — |
+| `agent` | dueño | lee | lee y escribe |
+
+- **`vectoredit_migrator`** es el dueño de los esquemas y de todas las tablas, y el único que puede crear
+  o cambiar tablas. Lo usa Alembic y ninguna aplicación en marcha: `alembic/env.py` hace `SET ROLE` a él antes
+  de migrar, así toda tabla nueva tiene el mismo dueño.
+- **`vectoredit_platform`** es la app de este repo.
+- **`vectoredit_agent`** es el agente. Créditos y cupos los cambia solo con funciones SQL autorizadas (VEC-41).
+
+Los tres son roles de grupo **sin login**. En cada entorno se crea un usuario con contraseña por servicio
+(`vectoredit_<rol>_login`), miembro de su rol, con `scripts/create_login_roles.sql`. Las contraseñas nunca van
+al repo y cada servicio tiene las suyas. Cómo crearlos en tu base local: [desarrollo.md](desarrollo.md#roles-en-tu-base-local).
+
+Los permisos se dan **por esquema**, no tabla por tabla, y con `ALTER DEFAULT PRIVILEGES`: una tabla que el
+migrador cree después recibe sola los permisos de la tabla de arriba. Para cambiar quién accede a un esquema,
+se hace en una migración nueva, no a mano.
+
+### La cuenta conectada
+
+Cada transacción empieza fijando la cuenta con `SET LOCAL` (en Python, `set_config('app.account_id', ..., true)`).
+`platform.current_account_id()` la devuelve, o `NULL` si no hay ninguna. Como `SET LOCAL` termina con la
+transacción, la cuenta no pasa a la siguiente petición aunque SQLAlchemy reutilice la conexión.
+
+En el código:
+
+```python
+from app.core.db import get_db, set_current_account
+
+
+def handler(db: Session = Depends(get_db)) -> ...:
+    set_current_account(db, account.id)  # desde aquí, toda consulta queda filtrada por esa cuenta
+```
+
+`set_current_account()` vale para toda la sesión: se vuelve a aplicar al empezar cada transacción, también
+después de un `commit()`. Lo llamará la dependencia de autenticación (VEC-4).
+El agente hace lo mismo con su conexión: `SELECT set_config('app.account_id', $1, true)` al abrir cada transacción.
+
+**Sin cuenta fijada, las tablas con RLS no muestran filas ni aceptan escrituras.** Si una consulta devuelve
+vacío sin motivo, revisa que se haya llamado a `set_current_account()`.
+
+Las tablas de `auth` no tienen RLS: se consultan antes de saber qué cuenta es (iniciar sesión, validar la cookie).
+
+### Política de una tabla nueva
+
+Toda tabla con datos de una cuenta lleva su política, en la **misma migración** que la crea. Autogenerate no
+la detecta: se agrega a mano debajo de `op.create_table(...)`. El modelo es `platform.accounts` (migración `0004`).
+
+Si la tabla tiene `account_id`:
+
+```python
+def upgrade() -> None:
+    op.create_table("...", ..., schema="billing")
+    op.execute("ALTER TABLE billing.credit_movements ENABLE ROW LEVEL SECURITY")
+    op.execute("ALTER TABLE billing.credit_movements FORCE ROW LEVEL SECURITY")
+    op.execute(
+        """
+        CREATE POLICY account_isolation ON billing.credit_movements
+            USING (account_id = platform.current_account_id())
+            WITH CHECK (account_id = platform.current_account_id())
+        """
+    )
+
+
+def downgrade() -> None:
+    op.drop_table("credit_movements", schema="billing")  # la política se borra con la tabla
+```
+
+Si la tabla tiene `workspace_id`, se compara con los espacios de la cuenta (ejemplo; ajústalo a cómo quede
+`platform.workspaces` en VEC-29):
+
+```sql
+CREATE POLICY account_isolation ON platform.documents
+    USING (workspace_id IN (
+        SELECT id FROM platform.workspaces WHERE owner_id = platform.current_account_id()))
+    WITH CHECK (workspace_id IN (
+        SELECT id FROM platform.workspaces WHERE owner_id = platform.current_account_id()))
+```
+
+- `USING` filtra lo que se lee, actualiza y borra; `WITH CHECK` impide escribir filas de otra cuenta.
+- `FORCE` hace que el dueño (el migrador) también quede filtrado. Solo los superusuarios se saltan RLS.
+  Por eso **las pruebas de seguridad no corren como superusuario**: cambian al rol con `SET LOCAL ROLE`
+  (ver `tests/test_database_security.py`). Agrega ahí la prueba de tu tabla.
+- Una migración de datos que tenga que tocar filas de todas las cuentas corre como superusuario, o desactiva
+  `FORCE` en esa migración y lo vuelve a activar al final.
+- Tablas de cupos y créditos (`billing.credit_balances`, `billing.credit_reservations`, `agent.period_quotas`,
+  `agent.reservations`): además de la política, el agente no debe escribirlas directo. La migración que
+  las crea quita esos permisos (`REVOKE INSERT, UPDATE, DELETE ... FROM vectoredit_agent`) y da `EXECUTE`
+  solo sobre las funciones de reserva y descuento (VEC-41).
 
 ## Pruebas contra la base
 
