@@ -124,6 +124,10 @@ Para el día a día puedes seguir con tu superusuario en `DATABASE_URL`, pero te
 - **Un superusuario se salta la seguridad por fila.** La app funciona, pero no te protege. Para ver lo mismo
   que verá la app desplegada, usa `vectoredit_platform_login` en `DATABASE_URL` (las migraciones siguen
   necesitando el migrador o tu superusuario).
+  Con `APP_ENV=staging` o `production` la app **no arranca** si `DATABASE_URL` es un superusuario, tiene
+  `BYPASSRLS`, es miembro del migrador o no es miembro de `vectoredit_platform` (`check_app_role()` en
+  `app/core/db.py`). Alembic sí corre con el migrador: en esos entornos la app y las migraciones usan
+  `DATABASE_URL` distintos.
 - Las pruebas de `tests/test_database_security.py` cambian de rol con `SET ROLE`, así que necesitan que
   `DATABASE_URL` sea un superusuario (o miembro de los tres roles).
 - La migración `0010` la corre un usuario que pueda crear roles (tu superusuario). Después, las migraciones

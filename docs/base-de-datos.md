@@ -261,7 +261,8 @@ def handler(db: Session = Depends(get_db)) -> ...:
 ```
 
 `set_current_account()` vale para toda la sesión: se vuelve a aplicar al empezar cada transacción, también
-después de un `commit()`. Lo llamará la dependencia de autenticación (VEC-4).
+después de un `commit()`. También se vuelve a aplicar después de deshacer un savepoint (`begin_nested()`),
+porque PostgreSQL deshace con él el `SET LOCAL` hecho adentro. Lo llamará la dependencia de autenticación (VEC-4).
 El agente hace lo mismo con su conexión: `SELECT set_config('app.account_id', $1, true)` al abrir cada transacción.
 
 **Sin cuenta fijada, las tablas con RLS no muestran filas ni aceptan escrituras.** Si una consulta devuelve

@@ -8,10 +8,12 @@ import os
 import uuid
 
 import pytest
+from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, func, select, text, update
 from sqlalchemy.exc import IntegrityError, ProgrammingError
 from sqlalchemy.orm import Session, sessionmaker
 
+from app import main
 from app.auth.models import AuthUser
 from app.core.config import get_settings
 from app.core.db import (
@@ -19,7 +21,9 @@ from app.core.db import (
     AGENT_ROLE,
     MIGRATOR_ROLE,
     PLATFORM_ROLE,
+    USER_ID_SETTING,
     SessionLocal,
+    check_app_role,
     set_current_account,
     set_current_user,
 )
@@ -203,6 +207,74 @@ def test_the_account_does_not_leak_to_the_next_request_on_the_same_connection() 
             assert _current_setting(next_request) in ("", None)
     finally:
         single_connection.dispose()
+
+
+def test_the_account_survives_a_rolled_back_savepoint() -> None:
+    account_id = uuid.uuid4()
+    with SessionLocal() as db:
+        db.scalar(select(1))
+        savepoint = db.begin_nested()
+        set_current_account(db, account_id)
+        savepoint.rollback()
+
+        assert _current_setting(db) == str(account_id)
+        db.rollback()
+
+
+def test_a_write_after_a_rolled_back_savepoint_has_the_account() -> None:
+    account_id = uuid.uuid4()
+    with SessionLocal() as db:
+        db.scalar(select(1))
+        savepoint = db.begin_nested()
+        set_current_account(db, account_id)
+        savepoint.rollback()
+
+        db.add(AuthUser(email="eva@example.com"))
+        db.flush()
+        # Straight on the connection, so only the flush can have set it again.
+        setting = db.connection().scalar(select(func.current_setting(ACCOUNT_ID_SETTING, True)))
+        assert setting == str(account_id)
+        db.rollback()
+
+
+def test_a_cleared_user_stays_cleared_after_a_rolled_back_savepoint() -> None:
+    with SessionLocal() as db:
+        set_current_user(db, uuid.uuid4())
+        db.scalar(select(1))
+        savepoint = db.begin_nested()
+        set_current_account(db, uuid.uuid4())  # clears the user
+        savepoint.rollback()
+
+        assert db.scalar(select(func.current_setting(USER_ID_SETTING, True))) in ("", None)
+        db.rollback()
+
+
+# Database user of the app (checked at startup outside development)
+
+
+@pytest.mark.parametrize("role", [None, MIGRATOR_ROLE, AGENT_ROLE])
+def test_the_app_refuses_a_user_that_skips_rls_or_is_not_the_platform(
+    db: Session, role: str | None
+) -> None:
+    # None: the test user itself, a superuser.
+    if role is not None:
+        _as_role(db, role)
+    with pytest.raises(RuntimeError, match="DATABASE_URL must be"):
+        check_app_role(db.connection())
+
+
+def test_the_app_does_not_start_in_production_as_a_superuser(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(main.settings, "app_env", "production")
+    with pytest.raises(RuntimeError, match="DATABASE_URL must be"):
+        with TestClient(main.app):
+            pass
+
+
+def test_the_app_accepts_the_platform_role(db: Session) -> None:
+    _as_role(db, PLATFORM_ROLE)
+    check_app_role(db.connection())
 
 
 # Privileges per schema
