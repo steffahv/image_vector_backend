@@ -11,7 +11,7 @@
 
 | Qué | Estilo | Ejemplo |
 |---|---|---|
-| Módulos y archivos | `snake_case` | `documents/service.py` |
+| Módulos, carpetas y archivos | `snake_case` | `documents/service/save.py` |
 | Clases | `PascalCase` | `DocumentResponse` |
 | Funciones y variables | `snake_case` | `get_current_user` |
 | Constantes | `UPPER_SNAKE_CASE` | `API_PREFIX` |
@@ -30,18 +30,28 @@
 - **Sin credenciales en el código.** Todo valor sensible se lee con `get_settings()`.
 - **Transacciones cortas** en el service, nunca en el router.
 
+## Una carpeta por capa, un archivo por tema
+
+- Cada capa del módulo es una carpeta: `router/`, `schemas/`, `service/`, `models/`.
+- Dentro, un archivo por tema: una tabla por archivo en `models/`, un caso de uso por archivo en `service/`,
+  un grupo de rutas por archivo en `router/`.
+- El `__init__.py` de la carpeta importa lo público. Desde afuera siempre se importa la carpeta
+  (`from app.auth.models import AuthUser`), nunca el archivo interno.
+- Si un archivo pasa de ~300 líneas, se divide en varios dentro de la misma carpeta.
+
 ## Agregar una ruta
 
-1. Define la entrada y la salida en `schemas.py`.
-2. Escribe la lógica en `service.py`.
-3. Agrega la ruta en `router.py` con `response_model` y `summary`.
+1. Define la entrada y la salida en un archivo de `schemas/` y expórtala en su `__init__.py`.
+2. Escribe la lógica en un archivo de `service/` y expórtala en su `__init__.py`.
+3. Agrega la ruta en un archivo de `router/` con su propio `APIRouter()`, `response_model` y `summary`,
+   e inclúyelo en `router/__init__.py` con `router.include_router(...)`.
 4. Agrega su prueba en `tests/`.
 5. Revisa que aparezca bien en `/docs`.
 
 ## Agregar un módulo
 
-1. Crea `app/<module>/` con `__init__.py`, `router.py`, `schemas.py`, `service.py` y `models.py`.
-   Cada archivo empieza con un docstring que dice qué va en él.
+1. Crea `app/<module>/` con las carpetas `router/`, `schemas/`, `service/` y `models/`, cada una con su `__init__.py`.
+   Cada `__init__.py` empieza con un docstring que dice qué va en esa carpeta.
 2. Registra el router en `app/main.py`.
 3. Registra los modelos en `app/core/models_registry.py` (cómo escribirlos: [base-de-datos.md](base-de-datos.md)).
 4. Agrega su tag en `TAGS_METADATA` de `app/core/openapi.py`.

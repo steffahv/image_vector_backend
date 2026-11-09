@@ -1,6 +1,6 @@
 """Imports every module's models so Alembic sees all tables.
 
-What goes here: one import per module that has a models.py.
+What goes here: one import per module that has a models/ folder.
 Add the import when you create a new module; otherwise
 `alembic revision --autogenerate` will not detect its tables.
 """

@@ -5,7 +5,7 @@ What goes here:
 - `get_db()`, the FastAPI dependency that opens one session per request.
 
 What does not go here: the model base and mixins (core/model_base.py), tables (each module's
-models.py) or queries (each module's service.py).
+models/) or queries (each module's service/).
 """
 
 from collections.abc import Iterator
