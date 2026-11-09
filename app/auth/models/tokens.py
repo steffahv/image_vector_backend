@@ -1,4 +1,7 @@
 """Shared rules for token hashes stored in auth tables."""
 
-SHA256_BYTES = 32
-TOKEN_HASH_CHECK = f"octet_length(token_hash) = {SHA256_BYTES}"
+from app.core.model_base import SHA256_BYTES, sha256_check
+
+__all__ = ["SHA256_BYTES", "TOKEN_HASH_CHECK"]
+
+TOKEN_HASH_CHECK = sha256_check("token_hash")

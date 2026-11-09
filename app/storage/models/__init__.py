@@ -1,9 +1,20 @@
 """SQLAlchemy tables for storage, in the `storage` PostgreSQL schema (VEC-29).
 
-What goes here: stored objects, pending uploads, revision-to-file links and quotas.
-See Modelo_relacional_VectorEdit.
+One file per table. See Modelo_relacional_VectorEdit §V and docs/base-de-datos.md.
 
-How to split: one file per table (e.g. `document.py`) in this folder,
-imported here so other code keeps importing from `app.storage.models`.
-`app/auth/models/` is an example.
+Done so far:
+- stored_object.py: `objects` (StoredObject), metadata and location of every file.
+
+Still planned: uploads, saves, workspace quotas and byte reservations.
+
+Import every table here: Alembic and other modules import from `app.storage.models`.
 """
+
+from app.storage.models.stored_object import (
+    ObjectEncoding,
+    ObjectKind,
+    ObjectStatus,
+    StoredObject,
+)
+
+__all__ = ["ObjectEncoding", "ObjectKind", "ObjectStatus", "StoredObject"]

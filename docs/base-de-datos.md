@@ -44,9 +44,14 @@ Columnas que se repiten en muchas tablas:
 
 ### Tablas de VEC-29 (las que otras tablas referencian)
 
-Si una tabla tuya apunta a una de estas, usa estos nombres. **Ya existen** (migración `0003`):
-`auth.users`, `auth.accounts`, `auth.sessions`, `auth.verifications` y `platform.accounts`.
-Las demás llegan después en VEC-29.
+Si una tabla tuya apunta a una de estas, usa estos nombres. **Ya existen:**
+
+- Migración `0003`: `auth.users`, `auth.accounts`, `auth.sessions`, `auth.verifications` y `platform.accounts`.
+- Migración `0005`: `platform.workspaces`, `platform.folders`, `platform.documents`, `platform.document_revisions`,
+  `platform.document_versions` y `storage.objects`.
+
+Las demás (`revision_images`, `share_links`, `uploads`, `saves`, `workspace_quotas` y `byte_reservations`)
+llegan después en VEC-29.
 
 | Modelo relacional | En la base | Clave que se referencia |
 |---|---|---|
@@ -68,6 +73,17 @@ Las demás llegan después en VEC-29.
 | `almacenamiento.cupos_espacio` | `storage.workspace_quotas` | — |
 | `almacenamiento.reservas_bytes` | `storage.byte_reservations` | — |
 
+Columnas de VEC-29 con traducción no evidente:
+
+| Tabla | Modelo relacional | En la base |
+|---|---|---|
+| `documents` | `revision_actual` | `current_revision` |
+| `document_revisions` | `objeto_json_id`, `objeto_miniatura_id` | `json_object_id`, `thumbnail_object_id` |
+| `document_revisions` | `bytes_json_original`, `autor_tipo` | `original_json_bytes`, `author_type` (`account`, `agent`) |
+| `document_versions` | `etiqueta`, `protegida_hasta` | `label`, `protected_until` |
+| `objects` | `clase`, `bytes`, `codificacion` | `kind`, `size_bytes`, `encoding` |
+| `objects` | `sin_referencias_desde`, `copia_verificada_at` | `unreferenced_since`, `copy_verified_at` |
+
 Las tablas de `billing`, `agent` y `operations` las traduce VEC-41 con las mismas reglas y las agrega a esta lista.
 
 ## Molde de una tabla
@@ -76,8 +92,9 @@ Toda tabla hereda de `Base` y, salvo que el modelo diga otra cosa, de `UUIDPrima
 
 | Viene de | Columna | Tipo en PostgreSQL |
 |---|---|---|
-| `UUIDPrimaryKey` | `id` | `uuid`, generado por la base (`gen_random_uuid()`) |
+| `UUIDPrimaryKey` | `id` | `uuid` v7, generado por la base (`uuidv7()`): empieza con la fecha de creación, así los índices crecen en orden |
 | `Timestamps` | `created_at`, `updated_at` | `timestamptz`, con `now()` por defecto |
+| `CreatedAt` | `created_at` | Igual, para filas que no cambian después de insertarse (revisiones, versiones, objetos) |
 
 Los tipos se ponen solos según la anotación de Python:
 
@@ -95,7 +112,7 @@ Sin `\| None`, la columna es `NOT NULL`.
 ## Ejemplo
 
 `platform.folders`: carpeta dentro de un espacio, con carpeta padre opcional del **mismo** espacio.
-Iría en `app/documents/models/folder.py` y se importaría en `app/documents/models/__init__.py`.
+Versión resumida de `app/documents/models/folder.py` (el archivo real además impide que una carpeta sea su propio padre).
 
 ```python
 import uuid
@@ -131,7 +148,7 @@ CREATE TABLE platform.folders (
     workspace_id UUID NOT NULL,
     parent_id UUID,
     name TEXT NOT NULL,
-    id UUID DEFAULT gen_random_uuid() NOT NULL,
+    id UUID DEFAULT uuidv7() NOT NULL,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
     CONSTRAINT pk_folders PRIMARY KEY (id),
