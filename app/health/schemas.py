@@ -1,3 +1,5 @@
+"""Response models for the health API."""
+
 from pydantic import BaseModel
 
 
