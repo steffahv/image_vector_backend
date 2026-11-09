@@ -21,11 +21,12 @@ from app.core.db import (
     PLATFORM_ROLE,
     SessionLocal,
     set_current_account,
+    set_current_user,
 )
 from app.documents.models import Account, AgentMode
 
 SCHEMAS = ("auth", "platform", "storage", "billing", "agent", "operations")
-AGENT_READ_ONLY = ("auth", "platform")
+AGENT_AUTH_TABLES = ("auth.users", "auth.sessions")
 AGENT_NO_ACCESS = ("storage", "billing", "operations")
 
 
@@ -120,6 +121,41 @@ def test_an_account_cannot_insert_rows_for_another(db: Session) -> None:
         db.flush()
 
 
+def test_sign_in_finds_the_account_of_the_signed_in_user(
+    db: Session, two_accounts: tuple[Account, Account]
+) -> None:
+    ana, _ = two_accounts
+    _as_role(db, PLATFORM_ROLE)
+    set_current_user(db, ana.auth_user_id)
+
+    assert _visible_account_ids(db) == {ana.id}
+
+
+def test_sign_in_creates_the_account_the_first_time(db: Session) -> None:
+    user = AuthUser(email="eva@example.com")
+    db.add(user)
+    db.flush()
+    _as_role(db, PLATFORM_ROLE)
+    set_current_user(db, user.id)
+
+    db.add(Account(auth_user_id=user.id, name="Eva", language="es", agent_mode=AgentMode.PLATFORM))
+    db.flush()
+
+
+def test_the_signed_in_user_cannot_create_an_account_for_another_user(db: Session) -> None:
+    eva, other = AuthUser(email="eva@example.com"), AuthUser(email="otro@example.com")
+    db.add_all([eva, other])
+    db.flush()
+    _as_role(db, PLATFORM_ROLE)
+    set_current_user(db, eva.id)
+
+    db.add(
+        Account(auth_user_id=other.id, name="Otro", language="es", agent_mode=AgentMode.PLATFORM)
+    )
+    with pytest.raises(ProgrammingError, match="row-level security"):
+        db.flush()
+
+
 # Identity per transaction
 
 
@@ -192,6 +228,23 @@ def test_agent_write_is_refused_by_the_database(
 
     with pytest.raises(ProgrammingError, match="permission denied"):
         db.execute(update(Account).where(Account.id == ana.id).values(name="changed"))
+
+
+def test_agent_reads_only_users_and_sessions_in_auth(db: Session) -> None:
+    tables = _tables(db, ("auth",))
+    assert set(AGENT_AUTH_TABLES) <= set(tables)
+    for table in tables:
+        expected = table in AGENT_AUTH_TABLES
+        assert _has_privilege(db, AGENT_ROLE, table, "SELECT") == expected, table
+
+
+def test_a_new_auth_table_is_not_readable_by_the_agent(db: Session) -> None:
+    _as_role(db, MIGRATOR_ROLE)
+    db.execute(text("CREATE TABLE auth.privileges_probe (id int)"))
+    db.execute(text("RESET ROLE"))
+
+    assert _has_privilege(db, PLATFORM_ROLE, "auth.privileges_probe", "INSERT")
+    assert not _has_privilege(db, AGENT_ROLE, "auth.privileges_probe", "SELECT")
 
 
 def test_agent_has_no_access_to_storage_billing_or_operations(db: Session) -> None:

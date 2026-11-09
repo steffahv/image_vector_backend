@@ -221,7 +221,7 @@ Así la protección no depende solo de que cada consulta esté bien escrita. Lo 
 
 | Esquema | `vectoredit_migrator` | `vectoredit_platform` | `vectoredit_agent` |
 |---|---|---|---|
-| `auth` | dueño | lee y escribe | lee |
+| `auth` | dueño | lee y escribe | lee solo `users` y `sessions` |
 | `platform` | dueño | lee y escribe | lee |
 | `storage` | dueño | lee y escribe | — |
 | `billing` | dueño | lee y escribe | — |
@@ -233,12 +233,14 @@ Así la protección no depende solo de que cada consulta esté bien escrita. Lo 
   de migrar, así toda tabla nueva tiene el mismo dueño.
 - **`vectoredit_platform`** es la app de este repo.
 - **`vectoredit_agent`** es el agente. Créditos y cupos los cambia solo con funciones SQL autorizadas (VEC-41).
+  En `auth` solo lee `users` y `sessions`, lo justo para validar la sesión: nunca ve contraseñas ni enlaces
+  de correo. Si el agente necesita otra tabla de `auth`, se le da en una migración nueva, tabla por tabla.
 
 Los tres son roles de grupo **sin login**. En cada entorno se crea un usuario con contraseña por servicio
 (`vectoredit_<rol>_login`), miembro de su rol, con `scripts/create_login_roles.sql`. Las contraseñas nunca van
 al repo y cada servicio tiene las suyas. Cómo crearlos en tu base local: [desarrollo.md](desarrollo.md#roles-en-tu-base-local).
 
-Los permisos se dan **por esquema**, no tabla por tabla, y con `ALTER DEFAULT PRIVILEGES`: una tabla que el
+Salvo esa excepción en `auth`, los permisos se dan **por esquema**, no tabla por tabla, y con `ALTER DEFAULT PRIVILEGES`: una tabla que el
 migrador cree después recibe sola los permisos de la tabla de arriba. Para cambiar quién accede a un esquema,
 se hace en una migración nueva, no a mano.
 
@@ -264,6 +266,23 @@ El agente hace lo mismo con su conexión: `SELECT set_config('app.account_id', $
 
 **Sin cuenta fijada, las tablas con RLS no muestran filas ni aceptan escrituras.** Si una consulta devuelve
 vacío sin motivo, revisa que se haya llamado a `set_current_account()`.
+
+### El usuario conectado (inicio de sesión)
+
+Al iniciar sesión se sabe qué usuario de `auth` entró, pero todavía no el id de su cuenta. Para eso está
+`set_current_user()`, que fija `app.user_id` igual que la cuenta. La política de `platform.accounts` acepta la
+cuenta fijada **o** la cuenta cuyo `auth_user_id` es el usuario conectado, así el inicio de sesión puede
+encontrarla, o crearla la primera vez:
+
+```python
+set_current_user(db, auth_user.id)
+account = db.scalar(select(Account).where(Account.auth_user_id == auth_user.id))
+if account is None:
+    account = Account(auth_user_id=auth_user.id, ...)  # primera vez
+set_current_account(db, account.id)
+```
+
+Solo `platform.accounts` usa el usuario conectado; las demás tablas filtran por la cuenta.
 
 Las tablas de `auth` no tienen RLS: se consultan antes de saber qué cuenta es (iniciar sesión, validar la cookie).
 

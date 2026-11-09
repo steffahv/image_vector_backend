@@ -6,7 +6,12 @@ go in the repo) as members of them: see scripts/create_login_roles.sql and docs/
 - vectoredit_migrator: owns the schemas and every table. Alembic switches to it (alembic/env.py),
   so every new table has the same owner and the default privileges below apply to it.
 - vectoredit_platform: the Python platform. Reads and writes its schemas.
-- vectoredit_agent: the TypeScript agent. Reads auth and platform, writes only agent.
+- vectoredit_agent: the TypeScript agent. Reads platform and, in auth, only users and sessions
+  (never password hashes or email links). Writes only agent.
+
+Row-level security on platform.accounts: a session sees the account it acts for, or the account
+of the signed-in user. The second case is how sign-in finds or creates the account before its id
+is known.
 
 Revision ID: 0010
 Revises: 0009
@@ -44,14 +49,18 @@ PRIVILEGES = {
         "agent": READ,
     },
     AGENT: {
-        "auth": READ,
         "platform": READ,
         "agent": READ_WRITE,
     },
 }
 
-# Must match ACCOUNT_ID_SETTING in app/core/db.py.
+# In auth the agent gets single tables, not the schema: it only validates sessions. Granting the
+# whole schema would also expose password hashes, email link hashes and any future auth table.
+AGENT_AUTH_TABLES = ("users", "sessions")
+
+# Must match ACCOUNT_ID_SETTING and USER_ID_SETTING in app/core/db.py.
 ACCOUNT_ID_SETTING = "app.account_id"
+USER_ID_SETTING = "app.user_id"
 
 
 def _create_roles() -> None:
@@ -116,26 +125,44 @@ def _grant_schema_privileges() -> None:
                 f'ALTER DEFAULT PRIVILEGES FOR ROLE {MIGRATOR} IN SCHEMA "{schema}" '
                 f"GRANT USAGE, SELECT ON SEQUENCES TO {role}"
             )
+    op.execute(f"GRANT USAGE ON SCHEMA auth TO {AGENT}")
+    for table in AGENT_AUTH_TABLES:
+        op.execute(f"GRANT SELECT ON auth.{table} TO {AGENT}")
 
 
-def _enable_account_rls() -> None:
-    # NULL when no account is set, so every policy matches nothing (fail closed).
+def _setting_function(name: str, setting: str) -> None:
+    # NULL when nothing is set, so every policy matches nothing (fail closed).
     # current_setting(..., true) returns '' rather than NULL once a SET LOCAL has ended.
     op.execute(
         f"""
-        CREATE FUNCTION platform.current_account_id() RETURNS uuid
+        CREATE FUNCTION platform.{name}() RETURNS uuid
         LANGUAGE sql STABLE
-        AS $$ SELECT nullif(current_setting('{ACCOUNT_ID_SETTING}', true), '')::uuid $$
+        AS $$ SELECT nullif(current_setting('{setting}', true), '')::uuid $$
         """
     )
+    # Created before this migration switches to the migrator, so hand it over like the rest.
+    op.execute(f"ALTER FUNCTION platform.{name}() OWNER TO {MIGRATOR}")
+
+
+def _enable_account_rls() -> None:
+    _setting_function("current_account_id", ACCOUNT_ID_SETTING)
+    _setting_function("current_auth_user_id", USER_ID_SETTING)
     op.execute("ALTER TABLE platform.accounts ENABLE ROW LEVEL SECURITY")
     # FORCE: the owner (the migrator) is filtered too. Only superusers skip RLS.
     op.execute("ALTER TABLE platform.accounts FORCE ROW LEVEL SECURITY")
+    # The account it acts for, or the signed-in user's own account: sign-in knows the user
+    # before the account, and must find it (or create it the first time).
     op.execute(
         """
         CREATE POLICY account_isolation ON platform.accounts
-            USING (id = platform.current_account_id())
-            WITH CHECK (id = platform.current_account_id())
+            USING (
+                id = platform.current_account_id()
+                OR auth_user_id = platform.current_auth_user_id()
+            )
+            WITH CHECK (
+                id = platform.current_account_id()
+                OR auth_user_id = platform.current_auth_user_id()
+            )
         """
     )
 
@@ -155,6 +182,7 @@ def downgrade() -> None:
     op.execute("ALTER TABLE platform.accounts NO FORCE ROW LEVEL SECURITY")
     op.execute("ALTER TABLE platform.accounts DISABLE ROW LEVEL SECURITY")
     op.execute("DROP FUNCTION platform.current_account_id()")
+    op.execute("DROP FUNCTION IF EXISTS platform.current_auth_user_id()")
 
     # Back to the user that connected, who takes the schemas and tables back.
     op.execute("RESET ROLE")
