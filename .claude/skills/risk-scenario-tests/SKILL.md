@@ -43,7 +43,7 @@ Two accounts and a restricted role:
 ```python
 @pytest.mark.parametrize("role", [PLATFORM_ROLE, AGENT_ROLE, MIGRATOR_ROLE])
 def test_each_account_sees_only_itself(db, two_accounts, role):
-    ana, luis = two_accounts          # created as the test user, before switching role
+    ana, luis = two_accounts  # created as the test user, before switching role
     _as_role(db, role)
     set_current_account(db, ana.id)
     assert _visible_account_ids(db) == {ana.id}
