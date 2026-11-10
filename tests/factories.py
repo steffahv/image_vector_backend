@@ -95,17 +95,22 @@ def make_document(db: Session, workspace: Workspace, **overrides: object) -> Doc
 
 
 def make_revision(
-    db: Session, document: Document, json_object: StoredObject, revision: int = 1
+    db: Session,
+    document: Document,
+    json_object: StoredObject,
+    revision: int = 1,
+    **overrides: object,
 ) -> DocumentRevision:
-    saved = DocumentRevision(
-        workspace_id=document.workspace_id,
-        document_id=document.id,
-        revision=revision,
-        json_object_id=json_object.id,
-        format_version=1,
-        original_json_bytes=json_object.size_bytes,
-        author_type=RevisionAuthorType.ACCOUNT,
-    )
+    values: dict[str, object] = {
+        "workspace_id": document.workspace_id,
+        "document_id": document.id,
+        "revision": revision,
+        "json_object_id": json_object.id,
+        "format_version": 1,
+        "original_json_bytes": json_object.size_bytes,
+        "author_type": RevisionAuthorType.ACCOUNT,
+    }
+    saved = DocumentRevision(**(values | overrides))
     db.add(saved)
     db.flush()
     return saved

@@ -5,7 +5,9 @@ The model is platform.accounts (migration 0010):
 - Every table with a workspace_id: a session sees the rows of those workspaces.
 
 WITH CHECK repeats the same rule, so a row cannot be written into, or moved to, another account's
-workspace. FORCE filters the owner (the migrator) too; only superusers skip it.
+workspace. Rows that record who acted (an upload, a save, a revision's author) also check that it
+is the session's account, so an action cannot be written in another account's name.
+FORCE filters the owner (the migrator) too; only superusers skip it.
 
 Revision ID: 0012
 Revises: 0011
@@ -43,12 +45,25 @@ POLICIES = {
     "storage.byte_reservations": IN_OWN_WORKSPACE,
 }
 
+# Checked only on write (WITH CHECK); reads still go by workspace.
+# The revision author may be NULL (an anonymized account, §IX-C).
+ACTOR_CHECKS = {
+    "platform.document_revisions": (
+        "(author_account_id IS NULL OR author_account_id = platform.current_account_id())"
+    ),
+    "storage.uploads": "account_id = platform.current_account_id()",
+    "storage.saves": "account_id = platform.current_account_id()",
+}
+
 
 def upgrade() -> None:
     for table, rule in POLICIES.items():
+        check = f"{rule} AND {ACTOR_CHECKS[table]}" if table in ACTOR_CHECKS else rule
         op.execute(f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY")
         op.execute(f"ALTER TABLE {table} FORCE ROW LEVEL SECURITY")
-        op.execute(f"CREATE POLICY account_isolation ON {table} USING ({rule}) WITH CHECK ({rule})")
+        op.execute(
+            f"CREATE POLICY account_isolation ON {table} USING ({rule}) WITH CHECK ({check})"
+        )
 
 
 def downgrade() -> None:

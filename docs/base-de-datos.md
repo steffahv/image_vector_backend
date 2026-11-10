@@ -303,13 +303,20 @@ Las tablas de `auth` no tienen RLS: se consultan antes de saber qué cuenta es (
 | `platform.folders`, `documents`, `document_revisions`, `revision_images`, `document_versions`, `share_links` | las filas de sus espacios (`workspace_id`) | `0012` |
 | `storage.objects`, `uploads`, `saves`, `workspace_quotas`, `byte_reservations` | las filas de sus espacios (`workspace_id`) | `0012` |
 
-Todas con `FORCE`. Dos pruebas de `tests/test_database_security.py` cuidan que no falte ninguna:
+Todas con `FORCE`. Las columnas que registran quién hizo algo (`storage.uploads.account_id`,
+`storage.saves.account_id` y `platform.document_revisions.author_account_id`) también se revisan al escribir:
+tienen que ser la cuenta de la sesión (el autor de una revisión puede quedar vacío). Así nadie registra una
+acción a nombre de otra cuenta.
+
+Tres pruebas de `tests/test_database_security.py` cuidan que no falte ninguna:
 
 - `test_every_table_with_account_data_has_forced_rls`: toda tabla de `platform`, `storage`, `billing`, `agent`
   y `operations` tiene que tener RLS forzada y una política. Si una tabla de esos esquemas de verdad no tiene
   datos de una cuenta (por ejemplo, un catálogo de planes), se agrega a `TABLES_WITHOUT_ACCOUNT_DATA` con el motivo.
 - `test_every_workspace_table_is_tested`: toda tabla con `workspace_id` tiene que estar en `WORKSPACE_TABLES`,
   así recibe las pruebas de aislamiento (y una fila en `_fill_workspace`).
+- `test_every_account_column_is_tested`: toda columna que apunta a `platform.accounts` tiene que estar en
+  `ACTOR_COLUMNS` (salvo `platform.workspaces.owner_id`), así se prueba que nadie la escribe a nombre de otra cuenta.
 
 Lo que RLS deja afuera **a propósito** y necesitará una función `SECURITY DEFINER` cuando llegue
 (ver [Funciones](#funciones)):

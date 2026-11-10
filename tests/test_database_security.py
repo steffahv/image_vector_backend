@@ -31,6 +31,7 @@ from app.core.db import (
 from app.documents.models import (
     Account,
     AgentMode,
+    DocumentRevision,
     DocumentVersion,
     Folder,
     RevisionImage,
@@ -617,6 +618,107 @@ def test_an_account_can_fill_its_own_new_workspace(
     db.flush()
 
     assert set(db.scalars(select(Folder.workspace_id))) == {workspace.id}
+
+
+# Columns that record which account acted. The policy also checks them on write, so a row in
+# Ana's workspace cannot claim that Luis did it. test_every_account_column_is_tested keeps
+# this list complete.
+ACTOR_COLUMNS = {
+    "platform.document_revisions": "author_account_id",
+    "storage.uploads": "account_id",
+    "storage.saves": "account_id",
+}
+
+
+def _record_action(
+    db: Session, table: str, workspace: Workspace, actor_id: uuid.UUID | None
+) -> None:
+    """Writes one row of `table` in `workspace`, recorded as done by `actor_id`."""
+    document = make_document(db, workspace)
+    if table == "platform.document_revisions":
+        make_revision(db, document, make_object(db, workspace), author_account_id=actor_id)
+    elif table == "storage.uploads":
+        make_upload(db, workspace, account_id=actor_id)
+    else:
+        make_save(db, document, account_id=actor_id)
+
+
+@pytest.mark.parametrize("role", WRITE_ROLES)
+@pytest.mark.parametrize("table", ACTOR_COLUMNS)
+def test_an_action_cannot_be_recorded_in_another_account_name(
+    db: Session, two_accounts: tuple[Account, Account], table: str, role: str
+) -> None:
+    ana, luis = two_accounts
+    workspace = make_workspace(db, ana)
+    as_role(db, role)
+    set_current_account(db, ana.id)
+
+    with pytest.raises(ProgrammingError, match="row-level security policy"):
+        _record_action(db, table, workspace, luis.id)
+
+
+@pytest.mark.parametrize("role", WRITE_ROLES)
+@pytest.mark.parametrize("table", ACTOR_COLUMNS)
+def test_an_action_cannot_be_handed_to_another_account(
+    db: Session, two_accounts: tuple[Account, Account], table: str, role: str
+) -> None:
+    ana, luis = two_accounts
+    workspace = make_workspace(db, ana)
+    _record_action(db, table, workspace, ana.id)
+    as_role(db, role)
+    set_current_account(db, ana.id)
+
+    with pytest.raises(ProgrammingError, match="row-level security policy"):
+        db.execute(
+            # `table` and the column come from ACTOR_COLUMNS, constants of this file.
+            text(f"UPDATE {table} SET {ACTOR_COLUMNS[table]} = :luis WHERE workspace_id = :ws"),
+            {"luis": luis.id, "ws": workspace.id},
+        )
+
+
+@pytest.mark.parametrize("table", ACTOR_COLUMNS)
+def test_an_account_records_actions_in_its_own_name(
+    db: Session, two_accounts: tuple[Account, Account], table: str
+) -> None:
+    ana, _ = two_accounts
+    workspace = make_workspace(db, ana)
+    as_role(db, PLATFORM_ROLE)
+    set_current_account(db, ana.id)
+
+    _record_action(db, table, workspace, ana.id)
+
+    actors = db.scalars(text(f"SELECT {ACTOR_COLUMNS[table]} FROM {table}")).all()
+    assert actors == [ana.id]
+
+
+def test_a_revision_can_have_no_author(db: Session, two_accounts: tuple[Account, Account]) -> None:
+    # An anonymized account leaves its revisions without author (§IX-C).
+    ana, _ = two_accounts
+    workspace = make_workspace(db, ana)
+    as_role(db, PLATFORM_ROLE)
+    set_current_account(db, ana.id)
+
+    _record_action(db, "platform.document_revisions", workspace, None)
+
+    assert db.scalar(select(func.count()).select_from(DocumentRevision)) == 1
+
+
+def test_every_account_column_is_tested(db: Session) -> None:
+    # A new column pointing to an account must say who may write it. workspaces.owner_id is
+    # covered by the workspace tests above.
+    account_columns = db.execute(
+        text(
+            "SELECT c.conrelid::regclass::text, a.attname FROM pg_constraint c"
+            " JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = ANY(c.conkey)"
+            " JOIN pg_namespace n ON n.oid = c.connamespace"
+            " WHERE c.contype = 'f' AND c.confrelid = 'platform.accounts'::regclass"
+            " AND n.nspname = ANY(:schemas)"
+        ),
+        {"schemas": list(ACCOUNT_DATA_SCHEMAS)},
+    ).all()
+    assert set(map(tuple, account_columns)) - {("platform.workspaces", "owner_id")} == set(
+        ACTOR_COLUMNS.items()
+    )
 
 
 @pytest.mark.parametrize(
