@@ -160,7 +160,7 @@ agente, y cambiarían con cada producto nuevo.
 |---|---|
 | `conversations`, `messages`, `runs`, `pending_calls` | lee y escribe |
 | `usage` | lee e inserta; nunca cambia ni borra un consumo ya registrado |
-| `period_quotas`, `reservations` | solo lee; reserva y liquida con las funciones de cupos (VEC-30), que todavía no existen |
+| `period_quotas`, `reservations` | solo lee; reserva, liquida y libera con las [funciones de cupos](#funciones-de-cupos) |
 | `rates` | solo lee |
 | `platform.*` | lee (cuenta, espacio, documento y versiones) |
 | `auth.users`, `auth.sessions` | lee, para validar la sesión con `auth.find_session()` |
@@ -420,13 +420,15 @@ Las tablas del agente que siguen a su padre o a la cuenta (`messages`, `pending_
 `period_quotas`, `reservations`) y `operations.object_copies` se prueban en `tests/test_agent_security.py`,
 con una tabla de qué rol puede leer, insertar, cambiar y borrar cada una (`READERS`, `INSERTERS`, ...).
 
-Lo que RLS deja afuera **a propósito** y necesitará una función `SECURITY DEFINER` cuando llegue
-(ver [Funciones](#funciones)):
+Lo que RLS deja afuera **a propósito**, y que necesitará su propio camino cuando llegue. Una función
+`SECURITY DEFINER` sola no alcanza, porque con `FORCE` las políticas también filtran al migrador (ver
+[Funciones](#funciones)). Hará falta una política o un rol pensados para ese caso, y se decide en su tarea:
 
 - **Abrir un enlace compartido** sin sesión: quien lo abre no tiene cuenta, así que no ve `platform.share_links`
-  ni el documento. La función busca el enlace por el hash del token y devuelve solo lo que el enlace permite.
-- **Tareas de limpieza** que recorren todas las cuentas (subidas y reservas vencidas): sin cuenta fijada no ven
-  nada. Cada tarea va en una función que hace solo esa limpieza.
+  ni el documento. Lo que se agregue tiene que buscar el enlace por el hash del token y devolver solo lo que el
+  enlace permite.
+- **Tareas de limpieza** que recorren todas las cuentas (subidas, reservas y llamadas vencidas, verificación de
+  copias): sin cuenta fijada no ven nada.
 
 ### Política de una tabla nueva
 
@@ -488,16 +490,60 @@ cada función nueva lleva su `GRANT EXECUTE` a los roles que la usan:
 ```sql
 CREATE FUNCTION billing.reserve_credits(...) RETURNS ...
     LANGUAGE plpgsql
-    SECURITY DEFINER                     -- corre como el migrador: se salta RLS a propósito
+    SECURITY DEFINER                     -- corre con los permisos del migrador
     SET search_path = pg_catalog, pg_temp
 AS $$ ... $$;
 GRANT EXECUTE ON FUNCTION billing.reserve_credits(...) TO vectoredit_agent;
 ```
 
-- Una función `SECURITY DEFINER` se salta RLS, así que valida ella misma la cuenta
-  (`platform.current_account_id()`) y nunca confía en un id que le pasen.
+- `SECURITY DEFINER` da **permisos**: la función escribe donde el que la llama no puede (por ejemplo, el agente
+  en `agent.period_quotas`). **No se salta la RLS**: las tablas usan `FORCE`, así que las políticas también
+  filtran al migrador, con la cuenta fijada por la sesión que llama. Una función así solo ve las filas de esa
+  cuenta.
+- Aun así, la función exige que haya cuenta fijada (`platform.current_account_id()` no nulo) y nunca confía en
+  un `account_id` que le pasen.
 - Siempre con `SET search_path = pg_catalog, pg_temp` y nombres completos (`billing.credit_balances`), para
   que nadie pueda colarle una tabla o función con el mismo nombre.
+  `test_every_security_definer_function_fixes_its_search_path` falla si una función no lo cumple.
+- Una tarea que de verdad tenga que recorrer todas las cuentas (limpiezas) no puede apoyarse en esto: sin
+  cuenta fijada no ve nada. Necesita un rol o una política propios, y se decide con esa tarea.
+
+### Funciones de cupos
+
+Migración `0014`. Son la **única** forma en que el agente cambia `agent.period_quotas` y `agent.reservations`.
+Validan saldo y límites en la misma operación que los cambian, con la fila del cupo bloqueada (`FOR UPDATE`),
+así dos ejecuciones que reservan a la vez se revisan una después de la otra y no pasan juntas el cupo.
+
+| Función | Qué hace |
+|---|---|
+| `agent.reserve_quota(run_id, resource, amount, expires_at) → uuid` | Reserva `amount` del cupo vigente de la cuenta para una ejecución activa. Devuelve el id de la reserva |
+| `agent.settle_reservation(reservation_id, used)` | Pasa `used` (entre 0 y lo reservado) a `consumed` y devuelve el resto |
+| `agent.release_reservation(reservation_id)` | Devuelve todo lo reservado (la ejecución falló o se canceló) |
+
+Las tres son **idempotentes**: repetir una llamada que ya tuvo efecto no cambia nada, así un reintento nunca
+cobra dos veces. `reserve_quota` repetida con la misma ejecución y recurso devuelve la misma reserva (con otra
+cantidad, falla). Solo las puede ejecutar `vectoredit_agent`.
+
+Desde el agente, dentro de la transacción en la que ya fijó la cuenta:
+
+```sql
+SELECT agent.reserve_quota($1, 'tokens', 4000, now() + interval '10 minutes');
+SELECT agent.settle_reservation($1, 3120);
+```
+
+Errores, con su propio SQLSTATE para que el agente los distinga sin leer el mensaje:
+
+| SQLSTATE | Cuándo |
+|---|---|
+| `VQ001` | No hay cuenta fijada en la transacción |
+| `VQ002` | La ejecución no existe, no es de la cuenta o ya terminó |
+| `VQ003` | La cuenta no tiene cupo vigente de ese recurso |
+| `VQ004` | El cupo no alcanza |
+| `VQ005` | La reserva no existe, no es de la cuenta, o ya se liquidó o liberó (según la llamada) |
+| `23514` | Cantidad no positiva, o `used` fuera de 0..lo reservado |
+
+Pendiente: liberar las reservas vencidas de ejecuciones que nunca terminaron. Es una tarea de mantenimiento que
+recorre todas las cuentas (ver el punto anterior) y va con la cola de trabajos (VEC-36).
 
 ## Pruebas contra la base
 

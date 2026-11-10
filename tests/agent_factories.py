@@ -101,7 +101,9 @@ def make_pending_call(db: Session, run: Run, call_id: str = "call-1") -> Pending
 def make_period_quota(
     db: Session, account_id: uuid.UUID, resource: str = "tokens", **overrides: object
 ) -> PeriodQuota:
-    starts_at = datetime.now(UTC)
+    # Started a day ago: PostgreSQL's now() is when the transaction began, earlier than Python's
+    # clock, and a period starting "now" would not be in force yet.
+    starts_at = datetime.now(UTC) - timedelta(days=1)
     values: dict[str, object] = {
         "account_id": account_id,
         "period_id": uuid.uuid4(),
