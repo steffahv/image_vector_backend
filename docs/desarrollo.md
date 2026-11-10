@@ -140,6 +140,68 @@ Para probar como el agente desde la terminal:
 psql -d test_1 -U vectoredit_agent_login -c "DELETE FROM platform.accounts"   # permission denied
 ```
 
+## Worker de mantenimiento
+
+Después de aplicar las migraciones, crea su login como administrador de PostgreSQL. Pasa la
+contraseña local al script sin guardarla en el repositorio.
+
+```bash
+psql -d test_1 -v ON_ERROR_STOP=1 -v worker_password='<contraseña>' \
+  -f scripts/create_worker_role.sql
+```
+
+Ejecuta `python -m app.jobs.worker` en un proceso separado de la API con `DATABASE_URL` para
+`vectoredit_worker_login`. El proceso requiere un login de worker. La retención de la cola y la caducidad de
+exportaciones están integradas. Las demás limpiezas se activan al conectar su servicio.
+
+### Encolar y ejecutar
+
+El módulo que origina un trabajo llama a `app.jobs.service.enqueue_job(db, request)` con un
+`app.jobs.schemas.JobRequest`, dentro de la transacción que lo origina. La función devuelve el ID
+del trabajo. Repetir el mismo tipo y payload con la misma clave del espacio devuelve ese mismo ID
+y conserva la fecha de ejecución original. Las claves que empiezan con `scheduled:` están
+reservadas al worker. El worker retira en lotes de hasta 1.000 filas los trabajos programados
+que llevan más de 30 días en estado terminal. Los trabajos a demanda, como las exportaciones,
+conservan su historial. Borrar un espacio borra sus trabajos dependientes.
+
+El worker reclama lotes de hasta 10 trabajos con `FOR UPDATE SKIP LOCKED`. El lease de cinco minutos
+permite recuperar los reclamos abandonados. Cada reclamo tiene un número de intento y un reclamo
+anterior queda inválido cuando otro worker toma el trabajo. Durante la ejecución se mantiene
+bloqueada la fila para impedir que otro worker la tome aunque venza el lease.
+
+Los efectos en PostgreSQL y el estado final se confirman juntos. Si el handler falla, se revierten
+sus cambios y el trabajo se reprograma con espera exponencial, comenzando en 30 segundos.
+Tras cinco intentos queda en `failed`. El registro incluye el ID, tipo, intento y clase de error.
+El código de error se guarda sin exponer mensajes ni payloads.
+
+### Conectar un handler
+
+El worker reconoce estas funciones exportadas desde el `service` del módulo dueño de los datos.
+
+| Firma | Módulo | Frecuencia |
+|---|---|---|
+| `expire_uploads_and_reservations(db, as_of)` | `storage` | Cada 5 minutos |
+| `purge_trash(db, older_than)` | `documents` | Diaria, con antigüedad de 30 días |
+| `prune_versions(db)` | `documents` | Diaria, según el límite del plan |
+| `delete_unused_objects(db, older_than)` | `storage` | Diaria, con antigüedad de 8 días |
+| `reconcile_storage_quotas(db)` | `storage` | Diaria |
+| `expire_exports(db, job)` | `jobs` | Cada hora, por espacio |
+| `generate_export(db, job)` | `jobs` | A demanda |
+
+El worker valida al arrancar que cada función instalada acepte la llamada. Entrega `as_of` y
+`older_than` como objetos `datetime` con zona horaria. Para exportaciones, `job` es un
+`JobContext` con el ID del trabajo, su espacio y el payload. Los servicios de VEC-31 y VEC-43
+implementan las limpiezas. La migración `0017` incluye la tabla de exportaciones. El servicio
+que genere el archivo se conecta mediante `generate_export` cuando esté implementado. El worker
+omite la generación si la solicitud venció. La caducidad marca la exportación como `expired`
+y suelta la referencia al archivo. El módulo de almacenamiento puede retirarlo después si comprueba
+que ya no está en uso.
+
+El handler deja el commit y el rollback al worker. La sesión del handler está dentro de un
+savepoint para que un commit local conserve la atomicidad con el estado del trabajo. Si modifica
+un servicio externo, usa el ID del trabajo como referencia estable para que una repetición sea
+segura. El handler de almacenamiento comprueba las referencias bajo bloqueo antes de borrar un archivo.
+
 ## Variables de entorno
 
 Todas se leen en `app/core/config.py`. `.env` nunca se sube al repo; `.env.example` sí, sin claves reales.

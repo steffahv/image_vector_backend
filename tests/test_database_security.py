@@ -417,7 +417,11 @@ WORKSPACE_TABLES = (
 )
 # Also have a workspace_id but follow other rules, tested in tests/test_agent_security.py:
 # anyone may add an audit entry, and it may have no workspace.
-WORKSPACE_TABLES_TESTED_ELSEWHERE = ("operations.audit_log",)
+WORKSPACE_TABLES_TESTED_ELSEWHERE = (
+    "operations.audit_log",
+    "operations.jobs",
+    "operations.exports",
+)
 # Schemas whose tables all hold account data. auth has none of it: it is read before the account
 # is known (sign-in, the session cookie).
 ACCOUNT_DATA_SCHEMAS = ("platform", "storage", "billing", "agent", "operations")
@@ -636,6 +640,7 @@ OWNER_COLUMNS = {
     ("billing.credit_balances", "account_id"),
     ("billing.credit_movements", "account_id"),
     ("billing.credit_reservations", "account_id"),
+    ("operations.exports", "account_id"),
 }
 
 
