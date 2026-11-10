@@ -1,9 +1,5 @@
-"""Business logic for billing (VEC-33, after launch).
+"""Billing operations exposed to other modules."""
 
-What goes here: plans and entitlements, payments, subscriptions and the credit
-functions the agent service calls to reserve and settle credits.
+from app.billing.service.version_limit import version_limit
 
-How to split: one file per use case (e.g. `save.py`, `open.py`) in this folder,
-imported here so other code keeps importing from `app.billing.service`.
-`app/auth/models/` is an example.
-"""
+__all__ = ["version_limit"]

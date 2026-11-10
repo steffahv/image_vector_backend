@@ -62,7 +62,7 @@ from tests.factories import (
 
 SCHEMAS = ("auth", "platform", "storage", "billing", "agent", "operations")
 AGENT_AUTH_TABLES = ("auth.users", "auth.sessions")
-AGENT_NO_ACCESS = ("storage", "billing", "operations")
+AGENT_NO_ACCESS = ("storage", "operations")
 
 
 def _visible_account_ids(db: Session) -> set[uuid.UUID]:
@@ -353,7 +353,7 @@ def test_a_new_function_is_executable_only_once_granted(db: Session) -> None:
     assert not db.scalar(select(func.has_function_privilege(PLATFORM_ROLE, probe, "EXECUTE")))
 
 
-def test_agent_has_no_access_to_storage_billing_or_operations(db: Session) -> None:
+def test_agent_has_no_access_to_storage_or_operations(db: Session) -> None:
     for schema in AGENT_NO_ACCESS:
         assert not db.scalar(select(func.has_schema_privilege(AGENT_ROLE, schema, "USAGE"))), schema
 
@@ -425,6 +425,10 @@ ACCOUNT_DATA_SCHEMAS = ("platform", "storage", "billing", "agent", "operations")
 TABLES_WITHOUT_ACCOUNT_DATA = (
     "agent.rates",  # provider prices, the same for every account
     "operations.backup_runs",  # one row per global backup
+    "billing.plans",  # catalog shared by all accounts
+    "billing.plan_entitlements",  # versioned catalog limits
+    "billing.credit_packs",  # global product catalog
+    "billing.gateway_events",  # platform-only inbox, before an account is known
 )
 
 
@@ -628,6 +632,10 @@ OWNER_COLUMNS = {
     ("platform.workspaces", "owner_id"),
     ("agent.conversations", "account_id"),
     ("agent.period_quotas", "account_id"),
+    ("billing.subscriptions", "account_id"),
+    ("billing.credit_balances", "account_id"),
+    ("billing.credit_movements", "account_id"),
+    ("billing.credit_reservations", "account_id"),
 }
 
 
@@ -707,7 +715,7 @@ def test_a_revision_can_have_no_author(db: Session, two_accounts: tuple[Account,
 def test_every_account_column_is_tested(db: Session) -> None:
     # A new column pointing to an account must say who may write it. The owner columns are
     # covered by the isolation tests: workspaces above, conversations here and period quotas in
-    # tests/test_agent_security.py.
+    # tests/test_agent_security.py, and billing in tests/test_billing_security.py.
     account_columns = db.execute(
         text(
             "SELECT c.conrelid::regclass::text, a.attname FROM pg_constraint c"

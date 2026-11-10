@@ -1,9 +1,24 @@
-"""SQLAlchemy tables for billing, in the `billing` PostgreSQL schema (VEC-41).
+"""The eight billing tables from Modelo relacional VectorEdit, section VI."""
 
-What goes here: plans, subscriptions, payments and credit ledger.
-See Modelo_relacional_VectorEdit.
+from app.billing.models.credit_balance import CreditBalance
+from app.billing.models.credit_movement import CreditMovement
+from app.billing.models.credit_pack import CreditPack
+from app.billing.models.credit_reservation import CreditReservation, CreditReservationStatus
+from app.billing.models.gateway_event import GatewayEvent, GatewayEventStatus
+from app.billing.models.plan import Plan
+from app.billing.models.plan_entitlement import PlanEntitlement
+from app.billing.models.subscription import Subscription, SubscriptionStatus
 
-How to split: one file per table (e.g. `document.py`) in this folder,
-imported here so other code keeps importing from `app.billing.models`.
-`app/auth/models/` is an example.
-"""
+__all__ = [
+    "CreditBalance",
+    "CreditMovement",
+    "CreditPack",
+    "CreditReservation",
+    "CreditReservationStatus",
+    "GatewayEvent",
+    "GatewayEventStatus",
+    "Plan",
+    "PlanEntitlement",
+    "Subscription",
+    "SubscriptionStatus",
+]
