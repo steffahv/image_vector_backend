@@ -16,7 +16,9 @@ LEVEL SECURITY, so the policies still apply to the owner and the functions canno
 account's rows, and they refuse to run with no account set.
 
 The quota row is locked (FOR UPDATE) before checking it, so two runs reserving at once are
-checked one after the other and cannot together pass the quota.
+checked one after the other and cannot together pass the quota. reserve_quota first locks the run,
+so two tries of the same reservation at once (a retried request) also go one after the other, and
+the second returns the first one.
 
 Errors use their own SQLSTATE, so the agent service can tell them apart without reading the text:
 VQ001 no account set, VQ002 run not found or not active, VQ003 no quota in force for the resource,
@@ -67,9 +69,11 @@ BEGIN
     END IF;
 
     -- RLS hides other accounts' runs, so another account's run is simply not found.
+    -- Locked until the transaction ends: a retry of this reservation waits here, then finds it.
     PERFORM 1 FROM agent.runs r
     WHERE r.id = reserve_quota.run_id AND r.account_id = account
-      AND r.status IN ('pending', 'running');
+      AND r.status IN ('pending', 'running')
+    FOR UPDATE;
     IF NOT FOUND THEN
         RAISE EXCEPTION 'run not found or not active' USING ERRCODE = 'VQ002';
     END IF;

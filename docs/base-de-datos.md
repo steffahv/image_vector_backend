@@ -522,7 +522,9 @@ así dos ejecuciones que reservan a la vez se revisan una después de la otra y 
 
 Las tres son **idempotentes**: repetir una llamada que ya tuvo efecto no cambia nada, así un reintento nunca
 cobra dos veces. `reserve_quota` repetida con la misma ejecución y recurso devuelve la misma reserva (con otra
-cantidad, falla). Solo las puede ejecutar `vectoredit_agent`.
+cantidad, falla). Eso vale también si el reintento llega mientras la primera llamada sigue en curso:
+`reserve_quota` bloquea primero la ejecución, así el reintento espera y después encuentra la reserva. Solo las
+puede ejecutar `vectoredit_agent`.
 
 Desde el agente, dentro de la transacción en la que ya fijó la cuenta:
 

@@ -390,3 +390,36 @@ def test_two_runs_reserving_at_once_cannot_pass_the_quota_together() -> None:
             assert _quota(db, account_id) == (60, 0)
     finally:
         _delete_account(account_id)
+
+
+def test_two_retries_of_a_reservation_at_once_return_the_same_one() -> None:
+    # A request retried while the first try is still running: the lock on the run makes the
+    # retry wait, then find the first reservation instead of failing on the unique key.
+    account_id, run_id, _ = _committed_turn()
+    results: list[uuid.UUID | str | None] = []
+
+    def retry_in_parallel() -> None:
+        with SessionLocal() as other:
+            _act_as_agent(other, account_id)
+            try:
+                results.append(_reserve(other, run_id, 60))
+                other.commit()
+            except DBAPIError as error:
+                results.append(getattr(error.orig, "sqlstate", None))
+
+    try:
+        with SessionLocal() as db:
+            _act_as_agent(db, account_id)
+            first = _reserve(db, run_id, 60)
+            parallel = threading.Thread(target=retry_in_parallel)
+            parallel.start()
+            time.sleep(0.5)
+            assert parallel.is_alive(), "the retry did not wait for the first try"
+            db.commit()
+        parallel.join(timeout=10)
+
+        assert results == [first]
+        with SessionLocal() as db:
+            assert _quota(db, account_id) == (60, 0)
+    finally:
+        _delete_account(account_id)
