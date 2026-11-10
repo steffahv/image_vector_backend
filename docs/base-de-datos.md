@@ -164,10 +164,51 @@ agente, y cambiarían con cada producto nuevo.
 | `rates` | solo lee |
 | `platform.*` | lee (cuenta, espacio, documento y versiones) |
 | `auth.users`, `auth.sessions` | lee, para validar la sesión con `auth.find_session()` |
-| `storage`, `billing`, `operations` | sin acceso |
+| `billing` | solo llama las [funciones de créditos](#funciones-de-créditos) |
+| `storage`, `operations` | sin acceso |
 
 Al abrir cada transacción fija la cuenta con `SELECT set_config('app.account_id', $1, true)`
 ([La cuenta conectada](#la-cuenta-conectada)); sin eso no ve ni escribe ninguna fila.
+
+### Tablas de VEC-47 (`billing`)
+
+La migración `0015` crea las ocho tablas del modelo relacional §VI.
+
+| Modelo relacional | En la base | Regla principal |
+|---|---|---|
+| `cobro.planes` | `billing.plans` | Código de plan como clave |
+| `cobro.derechos_plan` | `billing.plan_entitlements` | Clave `(plan_id, version)` y límites versionados en JSONB |
+| `cobro.suscripciones` | `billing.subscriptions` | Derechos fijados por `(plan_id, entitlement_version)` e ID único por pasarela |
+| `cobro.eventos_pasarela` | `billing.gateway_events` | Evento único por pasarela y disponible antes de identificar la cuenta |
+| `cobro.paquetes_credito` | `billing.credit_packs` | Créditos positivos y precio en centavos mayor o igual a cero |
+| `cobro.saldos_credito` | `billing.credit_balances` | Una fila por cuenta con `0 <= reserved <= balance` |
+| `cobro.movimientos_credito` | `billing.credit_movements` | Importe distinto de cero y clave `(account_id, reason, reference)` |
+| `cobro.reservas_credito` | `billing.credit_reservations` | Una reserva por ejecución, con FK a `agent.runs(account_id, id)` |
+
+Columnas con traducción no evidente.
+
+| Tabla | Modelo relacional | En la base |
+|---|---|---|
+| `plan_entitlements` | `vigente_desde`, `limites` | `effective_from`, `limits` |
+| `subscriptions` | `version_derechos`, `pasarela`, `pasarela_id` | `entitlement_version`, `gateway`, `gateway_subscription_id` |
+| `subscriptions` | `periodo_inicio`, `periodo_fin`, `cancela_al_final`, `gracia_hasta` | `period_start`, `period_end`, `cancel_at_period_end`, `grace_until` |
+| `gateway_events` | `evento_id`, `tipo`, `cuerpo`, `procesado_at` | `event_id`, `type`, `payload`, `processed_at` |
+| `credit_packs` | `creditos`, `precio_centavos`, `moneda`, `pasarela_producto_id` | `credits`, `price_cents`, `currency`, `gateway_product_id` |
+| `credit_balances` | `saldo`, `reservado` | `balance`, `reserved` |
+| `credit_movements` | `cantidad`, `motivo`, `referencia` | `amount`, `reason`, `reference` |
+| `credit_reservations` | `ejecucion_id`, `cantidad`, `expira_at` | `run_id`, `amount`, `expires_at` |
+
+| Columna | Valores |
+|---|---|
+| `subscriptions.status` | `active`, `trialing`, `past_due`, `cancelled` |
+| `gateway_events.status` | `pending`, `processed`, `failed` |
+| `credit_reservations.status` | `reserved`, `settled`, `released` |
+
+`limits.max_versions` es un entero positivo validado por Pydantic y PostgreSQL. Los derechos del plan
+gratuito usan 10 y los de los planes de pago usan 50. Para cambiar los derechos se agrega una versión.
+`billing.service.version_limit(db, account_id)` usa la versión fijada en una suscripción vigente, de
+prueba o en gracia por impago. Si hay varias suscripciones válidas, usa el mayor límite. Devuelve
+10 si no hay una suscripción visible y vigente. La sesión debe tener fijada la cuenta antes de llamarlo.
 
 ## Molde de una tabla
 
@@ -298,7 +339,7 @@ Así la protección no depende solo de que cada consulta esté bien escrita. Lo 
 | `auth` | dueño | lee y escribe | lee solo `users` y `sessions` |
 | `platform` | dueño | lee y escribe | lee |
 | `storage` | dueño | lee y escribe | — |
-| `billing` | dueño | lee y escribe | — |
+| `billing` | dueño | lee y escribe | solo funciones de créditos |
 | `operations` | dueño | lee y escribe | — |
 | `agent` | dueño | lee | lee y escribe |
 
@@ -311,7 +352,7 @@ Así la protección no depende solo de que cada consulta esté bien escrita. Lo 
   En `auth` solo lee `users` y `sessions`, lo justo para validar la sesión con `auth.find_session()`: nunca ve
   contraseñas ni enlaces de correo. Si el agente necesita otra tabla de `auth`, se le da en una migración nueva, tabla por tabla.
 
-Excepciones por tabla a esa matriz (migración `0013`, probadas en `tests/test_agent_security.py`):
+Excepciones por tabla de las migraciones `0013` y `0015`, cubiertas por las pruebas de seguridad.
 
 | Tabla | Excepción |
 |---|---|
@@ -320,6 +361,10 @@ Excepciones por tabla a esa matriz (migración `0013`, probadas en `tests/test_a
 | `agent.rates` | El agente solo la lee. La plataforma además inserta: un precio nuevo es una fila nueva, nunca se cambia uno viejo |
 | `agent.usage` | El agente inserta pero no cambia ni borra: es contabilidad |
 | `operations.audit_log` | Nadie lo cambia ni lo borra: solo se agregan entradas |
+| `billing.plan_entitlements` | La plataforma lee y agrega versiones de derechos |
+| `billing.credit_balances` | La plataforma lee. Las funciones abren el saldo y lo modifican |
+| `billing.credit_movements` | La plataforma lee. Las funciones agregan movimientos junto con el cambio de saldo |
+| `billing.credit_reservations` | La plataforma solo lee. Las funciones crean y liquidan reservas |
 
 Los tres son roles de grupo **sin login**. En cada entorno se crea un usuario con contraseña por servicio
 (`vectoredit_<rol>_login`), miembro de su rol, con `scripts/create_login_roles.sql`. Las contraseñas nunca van
@@ -390,9 +435,12 @@ Las tablas de `auth` no tienen RLS: se consultan antes de saber qué cuenta es (
 | `agent.period_quotas`, `reservations` | las de su cuenta (`account_id`) | `0013` |
 | `operations.object_copies` | las copias de los archivos de sus espacios | `0013` |
 | `operations.audit_log` | lee las entradas de sus espacios. Una sesión **sin cuenta** puede agregar una en cualquier espacio; **con cuenta**, solo en los suyos (o sin espacio) | `0013` |
+| `billing.subscriptions`, `credit_balances`, `credit_movements`, `credit_reservations` | las filas de su cuenta | `0015` |
 
-Sin RLS, porque no tienen datos de una cuenta: `agent.rates` (precios, iguales para todos) y
-`operations.backup_runs` (respaldos globales).
+Los catálogos `billing.plans`, `billing.plan_entitlements`, `billing.credit_packs` y `agent.rates`
+son globales, igual que `operations.backup_runs`. `billing.gateway_events` también es global
+porque recibe eventos antes de identificar una cuenta. Solo la plataforma y el migrador acceden
+a su contenido.
 
 **`operations.audit_log` se escribe con `db.execute(insert(AuditEntry).values(...))`, nunca con `db.add()`.**
 Una entrada se puede agregar sin cuenta fijada (un inicio de sesión fallido, un enlace compartido abierto sin
@@ -475,11 +523,10 @@ cada rol que tiene acceso).
   (ver `tests/test_database_security.py`). Agrega ahí la prueba de tu tabla.
 - Una migración de datos que tenga que tocar filas de todas las cuentas corre como superusuario, o desactiva
   `FORCE` en esa migración y lo vuelve a activar al final.
-- Tablas de cupos y créditos (`billing.credit_balances`, `billing.credit_reservations`, `agent.period_quotas`,
-  `agent.reservations`): además de la política, el agente no debe escribirlas directo. La migración que
-  las crea quita esos permisos (`REVOKE INSERT, UPDATE, DELETE ... FROM vectoredit_agent`, como hace la `0013`
-  con los cupos) y da `EXECUTE` solo sobre las funciones de reserva y descuento (cupos en VEC-30, créditos
-  en VEC-47).
+- El agente solo escribe cupos y créditos mediante funciones autorizadas. La migración `0013` quita
+  los permisos de escritura directa para las tablas de cupos. En `billing`, la migración `0015` concede
+  uso del esquema y ejecución de las funciones de créditos. Las tablas de `billing` conservan sus
+  permisos exclusivos de plataforma y migrador.
 
 ### Funciones
 
@@ -546,6 +593,39 @@ Errores, con su propio SQLSTATE para que el agente los distinga sin leer el mens
 
 Pendiente: liberar las reservas vencidas de ejecuciones que nunca terminaron. Es una tarea de mantenimiento que
 recorre todas las cuentas (ver el punto anterior) y va con la cola de trabajos (VEC-36).
+
+### Funciones de créditos
+
+Cada llamada requiere la cuenta fijada en la transacción. PostgreSQL bloquea la fila del saldo
+mientras lo modifica y la fila de la reserva mientras liquida. Las funciones que cambian el saldo
+total registran el movimiento en la misma transacción.
+
+`vectoredit_agent` ejecuta las funciones de reserva y liquidación.
+
+- `billing.reserve_credits(run_id uuid, amount bigint, expires_at timestamptz) -> uuid` reserva hasta
+  `balance - reserved` para una ejecución activa de esa cuenta. Reintentar con la misma ejecución y
+  cantidad devuelve el mismo ID y conserva el vencimiento original mientras siga en `reserved`.
+  Una reserva liquidada o liberada se rechaza con `VC005` mientras la ejecución siga activa.
+- `billing.settle_credits(reservation_id uuid, used bigint) -> void` descuenta el uso real, libera todo
+  lo reservado y escribe un movimiento `agent_usage` con el ID de la reserva como referencia. Usar
+  cero devuelve todos los créditos y marca la reserva como `released`. Repetir la misma liquidación
+  no vuelve a descontar. La caducidad identifica reservas para el trabajo de mantenimiento de VEC-36.
+
+`vectoredit_platform` ejecuta `billing.apply_credit_movement(amount bigint, reason text,
+reference text) -> uuid`. Una cantidad positiva acredita saldo y una negativa descuenta créditos
+disponibles. La función abre el saldo en la primera recarga y registra el movimiento en la misma
+transacción. El motivo `agent_usage` se reserva para la liquidación del agente. Repetir motivo,
+referencia e importe para la misma cuenta devuelve el mismo ID. Cambiar el importe en un reintento
+se rechaza. Motivo y referencia admiten hasta 64 y 512 bytes, respectivamente.
+
+| SQLSTATE | Motivo |
+|---|---|
+| `VC001` | Falta la cuenta de la sesión |
+| `VC002` | La ejecución o reserva no está disponible para esa cuenta |
+| `VC003` | Saldo disponible insuficiente o inexistente |
+| `VC004` | Cantidad, consumo, vencimiento, motivo o referencia inválidos |
+| `VC005` | Reserva cerrada o reintento que contradice la operación anterior |
+| `VC006` | El saldo reservado no coincide con la reserva |
 
 ## Pruebas contra la base
 
