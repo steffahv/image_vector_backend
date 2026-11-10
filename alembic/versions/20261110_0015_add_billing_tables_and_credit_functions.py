@@ -22,6 +22,7 @@ PLATFORM = "vectoredit_platform"
 ACCOUNT_TABLES = ("subscriptions", "credit_balances", "credit_movements", "credit_reservations")
 RESERVE = "billing.reserve_credits(uuid, bigint, timestamptz)"
 SETTLE = "billing.settle_credits(uuid, bigint)"
+APPLY_MOVEMENT = "billing.apply_credit_movement(bigint, text, text)"
 
 
 def _protect_billing() -> None:
@@ -33,19 +34,11 @@ def _protect_billing() -> None:
             f"CREATE POLICY account_isolation ON billing.{table} USING ({rule}) WITH CHECK ({rule})"
         )
 
-    # A change to a plan creates a new entitlement version. Movements are append-only.
+    op.execute(f"REVOKE UPDATE, DELETE ON billing.plan_entitlements FROM {PLATFORM}")
+    # Credit writes go through functions so a balance change always posts a movement.
     op.execute(
-        f"REVOKE UPDATE, DELETE ON billing.plan_entitlements, billing.credit_movements"
-        f" FROM {PLATFORM}"
-    )
-    op.execute(f"REVOKE INSERT, UPDATE, DELETE ON billing.credit_reservations FROM {PLATFORM}")
-    op.execute(f"REVOKE INSERT, UPDATE, DELETE ON billing.credit_balances FROM {PLATFORM}")
-    op.execute(f"GRANT INSERT (account_id, balance) ON billing.credit_balances TO {PLATFORM}")
-    op.execute(f"GRANT UPDATE (balance, updated_at) ON billing.credit_balances TO {PLATFORM}")
-    # Only the settlement function can post a debit against a reservation.
-    op.execute(
-        "CREATE POLICY platform_movements ON billing.credit_movements AS RESTRICTIVE"
-        f" FOR INSERT TO {PLATFORM} WITH CHECK (reason <> 'agent_usage')"
+        "REVOKE INSERT, UPDATE, DELETE ON billing.credit_balances, billing.credit_movements,"
+        f" billing.credit_reservations FROM {PLATFORM}"
     )
 
 
@@ -60,10 +53,9 @@ def _create_credit_functions() -> None:
         AS $$
         DECLARE
             v_account uuid := platform.current_account_id();
-            v_run_status text;
             v_available bigint;
             v_reservation_id uuid;
-            v_amount bigint;
+            v_existing billing.credit_reservations%ROWTYPE;
         BEGIN
             IF v_account IS NULL THEN
                 RAISE EXCEPTION 'credit operation requires an account' USING ERRCODE = 'VC001';
@@ -74,8 +66,9 @@ def _create_credit_functions() -> None:
             END IF;
 
             -- Keep the run active while opening a new reservation.
-            SELECT status INTO v_run_status FROM agent.runs
-            WHERE id = p_run_id AND account_id = v_account FOR UPDATE;
+            PERFORM 1 FROM agent.runs
+            WHERE id = p_run_id AND account_id = v_account AND status IN ('pending', 'running')
+            FOR UPDATE;
             IF NOT FOUND THEN
                 RAISE EXCEPTION 'credit run is unavailable' USING ERRCODE = 'VC002';
             END IF;
@@ -87,18 +80,18 @@ def _create_credit_functions() -> None:
                 RAISE EXCEPTION 'insufficient available credits' USING ERRCODE = 'VC003';
             END IF;
 
-            SELECT id, amount INTO v_reservation_id, v_amount FROM billing.credit_reservations
+            SELECT * INTO v_existing FROM billing.credit_reservations
             WHERE run_id = p_run_id AND account_id = v_account;
             IF FOUND THEN
-                IF v_amount <> p_amount THEN
+                IF v_existing.status <> 'reserved' THEN
+                    RAISE EXCEPTION 'credit reservation is already closed' USING ERRCODE = 'VC005';
+                END IF;
+                IF v_existing.amount <> p_amount THEN
                     RAISE EXCEPTION 'conflicting credit reservation retry' USING ERRCODE = 'VC005';
                 END IF;
-                RETURN v_reservation_id;
+                RETURN v_existing.id;
             END IF;
 
-            IF v_run_status NOT IN ('pending', 'running') THEN
-                RAISE EXCEPTION 'credit run is unavailable' USING ERRCODE = 'VC002';
-            END IF;
             IF p_expires_at <= clock_timestamp() THEN
                 RAISE EXCEPTION 'invalid credit reservation expiry' USING ERRCODE = 'VC004';
             END IF;
@@ -183,10 +176,71 @@ def _create_credit_functions() -> None:
         op.execute(f"GRANT EXECUTE ON FUNCTION {signature} TO {AGENT}")
 
 
+def _create_movement_function() -> None:
+    op.execute(
+        """
+        CREATE FUNCTION billing.apply_credit_movement(
+            p_amount bigint, p_reason text, p_reference text
+        ) RETURNS uuid
+        LANGUAGE plpgsql SECURITY DEFINER
+        SET search_path = pg_catalog, pg_temp
+        AS $$
+        DECLARE
+            v_account uuid := platform.current_account_id();
+            v_available bigint;
+            v_movement_id uuid;
+            v_prior_amount bigint;
+        BEGIN
+            IF v_account IS NULL THEN
+                RAISE EXCEPTION 'credit operation requires an account' USING ERRCODE = 'VC001';
+            END IF;
+            IF p_amount IS NULL OR p_amount = 0
+                OR p_reason IS NULL OR btrim(p_reason) IN ('', 'agent_usage')
+                OR octet_length(p_reason) > 64
+                OR p_reference IS NULL OR btrim(p_reference) = ''
+                OR octet_length(p_reference) > 512 THEN
+                RAISE EXCEPTION 'invalid credit movement' USING ERRCODE = 'VC004';
+            END IF;
+
+            -- Concurrent adjustments for a new account converge on the same wallet row.
+            INSERT INTO billing.credit_balances (account_id, balance)
+            VALUES (v_account, 0) ON CONFLICT (account_id) DO NOTHING;
+            SELECT balance - reserved INTO v_available FROM billing.credit_balances
+            WHERE account_id = v_account FOR UPDATE;
+
+            SELECT id, amount INTO v_movement_id, v_prior_amount FROM billing.credit_movements
+            WHERE account_id = v_account AND reason = p_reason AND reference = p_reference;
+            IF FOUND THEN
+                IF v_prior_amount <> p_amount THEN
+                    RAISE EXCEPTION 'conflicting credit movement retry' USING ERRCODE = 'VC005';
+                END IF;
+                RETURN v_movement_id;
+            END IF;
+
+            IF p_amount < -v_available THEN
+                RAISE EXCEPTION 'insufficient available credits' USING ERRCODE = 'VC003';
+            END IF;
+
+            UPDATE billing.credit_balances
+            SET balance = balance + p_amount, updated_at = now()
+            WHERE account_id = v_account;
+            INSERT INTO billing.credit_movements (account_id, amount, reason, reference)
+            VALUES (v_account, p_amount, p_reason, p_reference)
+            RETURNING id INTO v_movement_id;
+            RETURN v_movement_id;
+        END
+        $$;
+        """
+    )
+    op.execute(f"REVOKE EXECUTE ON FUNCTION {APPLY_MOVEMENT} FROM PUBLIC")
+    op.execute(f"GRANT EXECUTE ON FUNCTION {APPLY_MOVEMENT} TO {PLATFORM}")
+
+
 def upgrade() -> None:
     _create_tables()
     _protect_billing()
     _create_credit_functions()
+    _create_movement_function()
 
 
 def _create_tables() -> None:
@@ -479,6 +533,7 @@ def _create_tables() -> None:
 
 
 def downgrade() -> None:
+    op.execute(f"DROP FUNCTION {APPLY_MOVEMENT}")
     op.execute(f"DROP FUNCTION {SETTLE}")
     op.execute(f"DROP FUNCTION {RESERVE}")
     op.execute(f"REVOKE USAGE ON SCHEMA billing FROM {AGENT}")

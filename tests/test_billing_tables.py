@@ -120,6 +120,20 @@ def test_credit_reservation_cannot_point_to_another_accounts_run(
         )
 
 
+def test_run_cannot_get_a_second_credit_reservation_even_after_settlement(
+    db: Session, two_accounts: tuple[Account, Account]
+) -> None:
+    ana, _ = two_accounts
+    run = make_billable_run(db, ana)
+    reservation = insert(CreditReservation).values(
+        account_id=ana.id, run_id=run.id, amount=5, expires_at=in_one_hour()
+    )
+    db.execute(reservation.values(status=CreditReservationStatus.SETTLED))
+
+    with pytest.raises(IntegrityError, match="uq_credit_reservations_run_id"):
+        db.execute(reservation.values(status=CreditReservationStatus.RESERVED))
+
+
 def test_version_limit_is_pinned_and_cannot_read_another_account(
     db: Session, two_accounts: tuple[Account, Account]
 ) -> None:

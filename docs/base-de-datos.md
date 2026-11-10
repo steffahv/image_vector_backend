@@ -362,8 +362,8 @@ Excepciones por tabla de las migraciones `0013` y `0015`, cubiertas por las prue
 | `agent.usage` | El agente inserta pero no cambia ni borra: es contabilidad |
 | `operations.audit_log` | Nadie lo cambia ni lo borra: solo se agregan entradas |
 | `billing.plan_entitlements` | La plataforma lee y agrega versiones de derechos |
-| `billing.credit_balances` | La plataforma puede abrir un saldo y cambiar el total. El contador reservado solo cambia con las funciones |
-| `billing.credit_movements` | La plataforma lee y agrega movimientos. Solo la función de liquidación agrega débitos `agent_usage` |
+| `billing.credit_balances` | La plataforma lee. Las funciones abren el saldo y lo modifican |
+| `billing.credit_movements` | La plataforma lee. Las funciones agregan movimientos junto con el cambio de saldo |
 | `billing.credit_reservations` | La plataforma solo lee. Las funciones crean y liquidan reservas |
 
 Los tres son roles de grupo **sin login**. En cada entorno se crea un usuario con contraseña por servicio
@@ -596,25 +596,35 @@ recorre todas las cuentas (ver el punto anterior) y va con la cola de trabajos (
 
 ### Funciones de créditos
 
-Solo `vectoredit_agent` tiene permiso de ejecución. Cada llamada requiere la cuenta fijada en la
-transacción. PostgreSQL bloquea la fila del saldo mientras reserva, y la fila de la reserva mientras
-liquida. El saldo, la reserva y el movimiento se actualizan juntos dentro de la transacción.
+Cada llamada requiere la cuenta fijada en la transacción. PostgreSQL bloquea la fila del saldo
+mientras lo modifica y la fila de la reserva mientras liquida. Las funciones que cambian el saldo
+total registran el movimiento en la misma transacción.
+
+`vectoredit_agent` ejecuta las funciones de reserva y liquidación.
 
 - `billing.reserve_credits(run_id uuid, amount bigint, expires_at timestamptz) -> uuid` reserva hasta
   `balance - reserved` para una ejecución activa de esa cuenta. Reintentar con la misma ejecución y
-  cantidad devuelve el mismo ID y conserva el vencimiento original.
+  cantidad devuelve el mismo ID y conserva el vencimiento original mientras siga en `reserved`.
+  Una reserva liquidada o liberada se rechaza con `VC005` mientras la ejecución siga activa.
 - `billing.settle_credits(reservation_id uuid, used bigint) -> void` descuenta el uso real, libera todo
   lo reservado y escribe un movimiento `agent_usage` con el ID de la reserva como referencia. Usar
   cero devuelve todos los créditos y marca la reserva como `released`. Repetir la misma liquidación
   no vuelve a descontar. La caducidad identifica reservas para el trabajo de mantenimiento de VEC-36.
+
+`vectoredit_platform` ejecuta `billing.apply_credit_movement(amount bigint, reason text,
+reference text) -> uuid`. Una cantidad positiva acredita saldo y una negativa descuenta créditos
+disponibles. La función abre el saldo en la primera recarga y registra el movimiento en la misma
+transacción. El motivo `agent_usage` se reserva para la liquidación del agente. Repetir motivo,
+referencia e importe para la misma cuenta devuelve el mismo ID. Cambiar el importe en un reintento
+se rechaza. Motivo y referencia admiten hasta 64 y 512 bytes, respectivamente.
 
 | SQLSTATE | Motivo |
 |---|---|
 | `VC001` | Falta la cuenta de la sesión |
 | `VC002` | La ejecución o reserva no está disponible para esa cuenta |
 | `VC003` | Saldo disponible insuficiente o inexistente |
-| `VC004` | Cantidad, consumo o vencimiento inválidos |
-| `VC005` | El reintento contradice una reserva o liquidación anterior |
+| `VC004` | Cantidad, consumo, vencimiento, motivo o referencia inválidos |
+| `VC005` | Reserva cerrada o reintento que contradice la operación anterior |
 | `VC006` | El saldo reservado no coincide con la reserva |
 
 ## Pruebas contra la base

@@ -80,18 +80,17 @@ def test_rls_blocks_changing_or_removing_another_accounts_rows(
         db.execute(update(model).values(account_id=luis.id))
 
 
-def test_platform_cannot_open_a_wallet_for_another_account(
+def test_platform_cannot_open_a_wallet_directly(
     db: Session, two_accounts: tuple[Account, Account]
 ) -> None:
-    ana, luis = two_accounts
+    ana, _ = two_accounts
     as_role(db, PLATFORM_ROLE)
     set_current_account(db, ana.id)
-    db.execute(insert(CreditBalance).values(account_id=ana.id, balance=100))
-    with pytest.raises(ProgrammingError, match="row-level security"):
-        db.execute(insert(CreditBalance).values(account_id=luis.id, balance=100))
+    with pytest.raises(ProgrammingError, match="permission denied"):
+        db.execute(insert(CreditBalance).values(account_id=ana.id, balance=100))
 
 
-def test_platform_cannot_change_another_accounts_subscription_or_balance(
+def test_platform_cannot_change_another_accounts_subscription(
     db: Session, two_wallets: tuple[Account, Account]
 ) -> None:
     ana, luis = two_wallets
@@ -107,38 +106,31 @@ def test_platform_cannot_change_another_accounts_subscription_or_balance(
         == 0
     )
     assert db.execute(delete(Subscription).where(Subscription.account_id == luis.id)).rowcount == 0
-    assert (
-        db.execute(
-            update(CreditBalance).where(CreditBalance.account_id == luis.id).values(balance=0)
-        ).rowcount
-        == 0
-    )
 
 
-def test_platform_cannot_forge_agent_debit(
+def test_platform_cannot_insert_a_credit_movement_directly(
     db: Session, two_accounts: tuple[Account, Account]
 ) -> None:
     ana, _ = two_accounts
     as_role(db, PLATFORM_ROLE)
     set_current_account(db, ana.id)
-    with pytest.raises(ProgrammingError, match="row-level security"):
+    with pytest.raises(ProgrammingError, match="permission denied"):
         db.execute(
             insert(CreditMovement).values(
-                account_id=ana.id, amount=-10, reason="agent_usage", reference="forged"
+                account_id=ana.id, amount=10, reason="purchase", reference="payment-2"
             )
         )
 
 
-def test_platform_can_add_credits_without_editing_reserved_credits(
-    db: Session, two_wallets: tuple[Account, Account]
+@pytest.mark.parametrize("column", ["balance", "reserved"])
+def test_platform_cannot_edit_a_balance_directly(
+    db: Session, two_wallets: tuple[Account, Account], column: str
 ) -> None:
     ana, _ = two_wallets
     as_role(db, PLATFORM_ROLE)
     set_current_account(db, ana.id)
-    db.execute(update(CreditBalance).values(balance=200))
-    assert db.execute(select(CreditBalance.balance, CreditBalance.reserved)).one() == (200, 10)
     with pytest.raises(ProgrammingError, match="permission denied"):
-        db.execute(update(CreditBalance).values(reserved=0))
+        db.execute(update(CreditBalance).values({column: 200}))
 
 
 @pytest.mark.parametrize("table", [t for t in Base.metadata.sorted_tables if t.schema == "billing"])

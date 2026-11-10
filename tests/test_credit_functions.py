@@ -1,4 +1,4 @@
-"""Reserve and settle through the agent role, including retries on a separate connection."""
+"""Exercise credit operations through the service roles, including concurrent retries."""
 
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -44,6 +44,12 @@ def _settle(db: Session, reservation_id: uuid.UUID, used: int) -> None:
     db.execute(select(func.billing.settle_credits(reservation_id, used)))
 
 
+def _apply_movement(db: Session, amount: int, reason: str, reference: str) -> uuid.UUID:
+    movement = db.scalar(select(func.billing.apply_credit_movement(amount, reason, reference)))
+    assert isinstance(movement, uuid.UUID)
+    return movement
+
+
 def _as_agent(db: Session, account_id: uuid.UUID) -> None:
     as_role(db, AGENT_ROLE)
     set_current_account(db, account_id)
@@ -56,6 +62,14 @@ def _balance(db: Session, account_id: uuid.UUID) -> tuple[int, int]:
         )
     ).one()
     return balance, reserved
+
+
+def _wait_for_blocked_backend(db: Session, backend_pid: Queue[int]) -> None:
+    pid = backend_pid.get(timeout=3)
+    deadline = monotonic() + 3
+    while not db.scalar(select(func.pg_blocking_pids(pid))):
+        assert monotonic() < deadline, "the second transaction did not reach the lock"
+        sleep(0.01)
 
 
 def test_settlement_retries_do_not_charge_twice(
@@ -74,6 +88,10 @@ def test_settlement_retries_do_not_charge_twice(
 
     _settle(db, reservation_id, 35)
     _settle(db, reservation_id, 35)
+    with pytest.raises(DBAPIError, match="credit reservation is already closed") as closed:
+        with db.begin_nested():
+            _reserve(db, run_id, 60)
+    assert closed.value.orig.sqlstate == "VC005"
     with pytest.raises(DBAPIError, match="conflicting credit settlement retry"), db.begin_nested():
         _settle(db, reservation_id, 34)
 
@@ -94,6 +112,10 @@ def test_release_returns_the_whole_reservation_without_a_debit(
     reservation_id = _reserve(db, run_id, 100)
     _settle(db, reservation_id, 0)
     _settle(db, reservation_id, 0)
+    with pytest.raises(DBAPIError, match="credit reservation is already closed") as closed:
+        with db.begin_nested():
+            _reserve(db, run_id, 100)
+    assert closed.value.orig.sqlstate == "VC005"
     with pytest.raises(DBAPIError, match="conflicting credit settlement retry"), db.begin_nested():
         _settle(db, reservation_id, 1)
 
@@ -101,6 +123,96 @@ def test_release_returns_the_whole_reservation_without_a_debit(
     assert _balance(db, account_id) == (100, 0)
     assert db.scalar(select(CreditReservation.status)) == CreditReservationStatus.RELEASED
     assert db.scalar(select(func.count()).select_from(CreditMovement)) == 0
+
+
+def test_credit_adjustments_and_agent_charges_reconcile_to_the_ledger(
+    db: Session, two_accounts: tuple[Account, Account]
+) -> None:
+    ana, luis = two_accounts
+    ana_id, luis_id = ana.id, luis.id
+    run_id = make_billable_run(db, ana).id
+    as_role(db, PLATFORM_ROLE)
+    with pytest.raises(DBAPIError, match="requires an account"), db.begin_nested():
+        _apply_movement(db, 100, "purchase", "payment-1")
+    set_current_account(db, ana_id)
+
+    purchase = _apply_movement(db, 100, "purchase", "payment-1")
+    assert _apply_movement(db, 100, "purchase", "payment-1") == purchase
+    with pytest.raises(DBAPIError, match="conflicting credit movement retry"), db.begin_nested():
+        _apply_movement(db, 101, "purchase", "payment-1")
+    with pytest.raises(DBAPIError, match="invalid credit movement"), db.begin_nested():
+        _apply_movement(db, -1, "agent_usage", "forged")
+
+    _as_agent(db, ana_id)
+    reservation = _reserve(db, run_id, 60)
+    as_role(db, PLATFORM_ROLE)
+    with pytest.raises(DBAPIError, match="insufficient available credits"), db.begin_nested():
+        _apply_movement(db, -41, "refund", "refund-1")
+    assert _balance(db, ana_id) == (100, 60)
+
+    refund = _apply_movement(db, -20, "refund", "refund-1")
+    assert _apply_movement(db, -20, "refund", "refund-1") == refund
+    _as_agent(db, ana_id)
+    _settle(db, reservation, 35)
+    as_role(db, PLATFORM_ROLE)
+
+    assert _balance(db, ana_id) == (45, 0)
+    assert db.scalar(select(func.sum(CreditMovement.amount))) == 45
+    assert db.scalar(select(func.count()).select_from(CreditMovement)) == 3
+
+    set_current_account(db, luis_id)
+    assert _apply_movement(db, 100, "purchase", "payment-1") != purchase
+    assert _balance(db, luis_id) == (100, 0)
+    assert db.scalar(select(func.sum(CreditMovement.amount))) == 100
+
+
+def test_agent_cannot_apply_credit_movements(
+    db: Session, two_accounts: tuple[Account, Account]
+) -> None:
+    _as_agent(db, two_accounts[0].id)
+    with pytest.raises(ProgrammingError, match="permission denied for function"):
+        _apply_movement(db, 100, "purchase", "payment-1")
+
+
+def test_concurrent_purchase_retries_create_one_wallet_and_movement() -> None:
+    with Session(engine) as setup:
+        account = make_account(setup, f"{uuid.uuid4().hex}@example.com")
+        account_id, user_id = account.id, account.auth_user_id
+        setup.commit()
+
+    backend_pid: Queue[int] = Queue()
+
+    def purchase_on_second_connection() -> uuid.UUID:
+        with Session(engine) as db:
+            as_role(db, PLATFORM_ROLE)
+            set_current_account(db, account_id)
+            db.execute(text("SET LOCAL statement_timeout = '5s'"))
+            backend_pid.put(db.scalars(select(func.pg_backend_pid())).one())
+            movement = _apply_movement(db, 100, "purchase", "payment-1")
+            db.commit()
+            return movement
+
+    try:
+        with ThreadPoolExecutor(max_workers=1) as worker, Session(engine) as db:
+            as_role(db, PLATFORM_ROLE)
+            set_current_account(db, account_id)
+            first = _apply_movement(db, 100, "purchase", "payment-1")
+            retry = worker.submit(purchase_on_second_connection)
+            _wait_for_blocked_backend(db, backend_pid)
+            db.commit()
+            assert retry.result(timeout=5) == first
+
+        with Session(engine) as observer:
+            assert _balance(observer, account_id) == (100, 0)
+            movements = select(CreditMovement.id).where(CreditMovement.account_id == account_id)
+            assert observer.scalars(movements).all() == [first]
+    finally:
+        with Session(engine) as cleanup:
+            cleanup.execute(delete(CreditMovement).where(CreditMovement.account_id == account_id))
+            cleanup.execute(delete(CreditBalance).where(CreditBalance.account_id == account_id))
+            cleanup.execute(delete(Account).where(Account.id == account_id))
+            cleanup.execute(delete(AuthUser).where(AuthUser.id == user_id))
+            cleanup.commit()
 
 
 @pytest.mark.parametrize(
@@ -204,12 +316,7 @@ def test_concurrent_reservations_use_the_committed_balance(same_run: bool) -> No
             _as_agent(db, account_id)
             first_reservation = _reserve(db, first_id, 60)
             pending = worker.submit(reserve_on_second_connection)
-            pid = backend_pid.get(timeout=3)
-            deadline = monotonic() + 3
-            while not db.scalar(select(func.pg_blocking_pids(pid))):
-                assert not pending.done(), "the second reservation did not wait"
-                assert monotonic() < deadline, "the second reservation did not reach the lock"
-                sleep(0.01)
+            _wait_for_blocked_backend(db, backend_pid)
             db.commit()
 
             if same_run:
