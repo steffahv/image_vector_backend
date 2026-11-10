@@ -2,7 +2,7 @@
 
 import hashlib
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy.orm import Session
 
@@ -15,10 +15,21 @@ from app.documents.models import (
     DocumentSource,
     DocumentStatus,
     RevisionAuthorType,
+    ShareLink,
     Workspace,
     WorkspaceType,
 )
-from app.storage.models import ObjectEncoding, ObjectKind, ObjectStatus, StoredObject
+from app.storage.models import (
+    DocumentSave,
+    ObjectEncoding,
+    ObjectKind,
+    ObjectStatus,
+    SaveStatus,
+    StoredObject,
+    Upload,
+    UploadStatus,
+    WorkspaceQuota,
+)
 
 
 def make_account(db: Session, email: str = "ana@example.com") -> Account:
@@ -84,17 +95,81 @@ def make_document(db: Session, workspace: Workspace, **overrides: object) -> Doc
 
 
 def make_revision(
-    db: Session, document: Document, json_object: StoredObject, revision: int = 1
+    db: Session,
+    document: Document,
+    json_object: StoredObject,
+    revision: int = 1,
+    **overrides: object,
 ) -> DocumentRevision:
-    saved = DocumentRevision(
-        workspace_id=document.workspace_id,
-        document_id=document.id,
-        revision=revision,
-        json_object_id=json_object.id,
-        format_version=1,
-        original_json_bytes=json_object.size_bytes,
-        author_type=RevisionAuthorType.ACCOUNT,
-    )
+    values: dict[str, object] = {
+        "workspace_id": document.workspace_id,
+        "document_id": document.id,
+        "revision": revision,
+        "json_object_id": json_object.id,
+        "format_version": 1,
+        "original_json_bytes": json_object.size_bytes,
+        "author_type": RevisionAuthorType.ACCOUNT,
+    }
+    saved = DocumentRevision(**(values | overrides))
     db.add(saved)
     db.flush()
     return saved
+
+
+def in_one_hour() -> datetime:
+    return datetime.now(UTC) + timedelta(hours=1)
+
+
+def make_share_link(db: Session, document: Document, token: str = "token") -> ShareLink:
+    link = ShareLink(
+        workspace_id=document.workspace_id,
+        document_id=document.id,
+        token_hash=hashlib.sha256(token.encode()).digest(),
+        active=True,
+        allows_download=False,
+    )
+    db.add(link)
+    db.flush()
+    return link
+
+
+def make_save(db: Session, document: Document, **overrides: object) -> DocumentSave:
+    owner_id = db.get(Workspace, document.workspace_id).owner_id  # type: ignore[union-attr]
+    values: dict[str, object] = {
+        "workspace_id": document.workspace_id,
+        "document_id": document.id,
+        "account_id": owner_id,
+        "idempotency_key": uuid.uuid4(),
+        "request_fingerprint": b"fingerprint",
+        "base_revision": 0,
+        "status": SaveStatus.PREPARING,
+        "expires_at": in_one_hour(),
+    }
+    save = DocumentSave(**(values | overrides))
+    db.add(save)
+    db.flush()
+    return save
+
+
+def make_upload(db: Session, workspace: Workspace, **overrides: object) -> Upload:
+    values: dict[str, object] = {
+        "workspace_id": workspace.id,
+        "account_id": workspace.owner_id,
+        "kind": ObjectKind.IMAGE,
+        "temp_key": f"tmp/{uuid.uuid4()}",
+        "max_bytes": 1024,
+        "status": UploadStatus.PENDING,
+        "expires_at": in_one_hour(),
+    }
+    upload = Upload(**(values | overrides))
+    db.add(upload)
+    db.flush()
+    return upload
+
+
+def make_quota(db: Session, workspace: Workspace, **overrides: int) -> WorkspaceQuota:
+    values = {"limit_bytes": 1000, "used_bytes": 0, "reserved_bytes": 0} | overrides
+    quota = WorkspaceQuota(workspace_id=workspace.id, **values)
+    db.add(quota)
+    db.flush()
+    return quota

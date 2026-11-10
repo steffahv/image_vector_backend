@@ -294,6 +294,38 @@ no puede pasar a ser de otro usuario aunque el código tenga un error.
 
 Las tablas de `auth` no tienen RLS: se consultan antes de saber qué cuenta es (iniciar sesión, validar la cookie).
 
+### Tablas con RLS
+
+| Tablas | Una sesión ve | Migración |
+|---|---|---|
+| `platform.accounts` | su cuenta (o, al iniciar sesión, la del usuario conectado) | `0010` |
+| `platform.workspaces` | los espacios de su cuenta (`owner_id`) | `0012` |
+| `platform.folders`, `documents`, `document_revisions`, `revision_images`, `document_versions`, `share_links` | las filas de sus espacios (`workspace_id`) | `0012` |
+| `storage.objects`, `uploads`, `saves`, `workspace_quotas`, `byte_reservations` | las filas de sus espacios (`workspace_id`) | `0012` |
+
+Todas con `FORCE`. Las columnas que registran quién hizo algo (`storage.uploads.account_id`,
+`storage.saves.account_id` y `platform.document_revisions.author_account_id`) también se revisan al escribir:
+tienen que ser la cuenta de la sesión (el autor de una revisión puede quedar vacío). Así nadie registra una
+acción a nombre de otra cuenta.
+
+Tres pruebas de `tests/test_database_security.py` cuidan que no falte ninguna:
+
+- `test_every_table_with_account_data_has_forced_rls`: toda tabla de `platform`, `storage`, `billing`, `agent`
+  y `operations` tiene que tener RLS forzada y una política. Si una tabla de esos esquemas de verdad no tiene
+  datos de una cuenta (por ejemplo, un catálogo de planes), se agrega a `TABLES_WITHOUT_ACCOUNT_DATA` con el motivo.
+- `test_every_workspace_table_is_tested`: toda tabla con `workspace_id` tiene que estar en `WORKSPACE_TABLES`,
+  así recibe las pruebas de aislamiento (y una fila en `_fill_workspace`).
+- `test_every_account_column_is_tested`: toda columna que apunta a `platform.accounts` tiene que estar en
+  `ACTOR_COLUMNS` (salvo `platform.workspaces.owner_id`), así se prueba que nadie la escribe a nombre de otra cuenta.
+
+Lo que RLS deja afuera **a propósito** y necesitará una función `SECURITY DEFINER` cuando llegue
+(ver [Funciones](#funciones)):
+
+- **Abrir un enlace compartido** sin sesión: quien lo abre no tiene cuenta, así que no ve `platform.share_links`
+  ni el documento. La función busca el enlace por el hash del token y devuelve solo lo que el enlace permite.
+- **Tareas de limpieza** que recorren todas las cuentas (subidas y reservas vencidas): sin cuenta fijada no ven
+  nada. Cada tarea va en una función que hace solo esa limpieza.
+
 ### Política de una tabla nueva
 
 Toda tabla con datos de una cuenta lleva su política, en la **misma migración** que la crea. Autogenerate no
@@ -319,16 +351,19 @@ def downgrade() -> None:
     op.drop_table("credit_movements", schema="billing")  # la política se borra con la tabla
 ```
 
-Si la tabla tiene `workspace_id`, se compara con los espacios de la cuenta (ejemplo; ajústalo a cómo quede
-`platform.workspaces` en VEC-29):
+Si la tabla tiene `workspace_id`, se compara con los espacios de la cuenta, como en la migración `0012`:
 
 ```sql
-CREATE POLICY account_isolation ON platform.documents
-    USING (workspace_id IN (
-        SELECT id FROM platform.workspaces WHERE owner_id = platform.current_account_id()))
-    WITH CHECK (workspace_id IN (
-        SELECT id FROM platform.workspaces WHERE owner_id = platform.current_account_id()))
+CREATE POLICY account_isolation ON storage.uploads
+    USING (workspace_id IN (SELECT w.id FROM platform.workspaces w
+                            WHERE w.owner_id = platform.current_account_id()))
+    WITH CHECK (workspace_id IN (SELECT w.id FROM platform.workspaces w
+                                 WHERE w.owner_id = platform.current_account_id()))
 ```
+
+Agrega la tabla a `WORKSPACE_TABLES` y una fila suya a `_fill_workspace` en `tests/test_database_security.py`:
+así corre todas las pruebas de aislamiento (leer, cambiar, borrar, mover e insertar en otro espacio, con
+cada rol que tiene acceso).
 
 - `USING` filtra lo que se lee, actualiza y borra; `WITH CHECK` impide escribir filas de otra cuenta.
 - `FORCE` hace que el dueño (el migrador) también quede filtrado. Solo los superusuarios se saltan RLS.
