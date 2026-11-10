@@ -12,9 +12,9 @@ Toda tabla vive en uno de estos esquemas, nunca en `public`. Los crea la migraci
 | `auth` | `auth` | `app/auth/models/` | VEC-29 |
 | `platform` | `plataforma` | `app/documents/models/` | VEC-29 |
 | `storage` | `almacenamiento` | `app/storage/models/` | VEC-29 |
-| `billing` | `cobro` | `app/billing/models/` | VEC-41 |
+| `billing` | `cobro` | `app/billing/models/` | VEC-47 |
 | `agent` | `agente` | `app/agent/models/` | VEC-41 |
-| `operations` | `operacion` | `app/jobs/models/` | VEC-41 |
+| `operations` | `operacion` | `app/jobs/models/` | VEC-41 (`jobs` en VEC-36) |
 
 En el código se usan con `DbSchema` (`app/core/model_base.py`): `DbSchema.PLATFORM`, `DbSchema.BILLING`, etc.
 
@@ -96,7 +96,78 @@ Columnas de VEC-29 con traducción no evidente:
 | `workspace_quotas` | `limite_bytes`, `usados_bytes`, `reservados_bytes` | `limit_bytes`, `used_bytes`, `reserved_bytes` |
 | `byte_reservations` | `cantidad` | `amount` |
 
-Las tablas de `billing`, `agent` y `operations` las traduce VEC-41 con las mismas reglas y las agrega a esta lista.
+### Tablas de VEC-41 (`agent` y `operations`)
+
+Migración `0013`. Faltan `operations.jobs` (VEC-36) y `operations.exports`, que apunta a un trabajo y llega
+cuando exista `jobs`. Las tablas de `billing` son de VEC-47.
+
+| Modelo relacional | En la base | Clave que se referencia |
+|---|---|---|
+| `agente.conversaciones` | `agent.conversations` | `(account_id, workspace_id, id)` |
+| `agente.mensajes` | `agent.messages` | — |
+| `agente.ejecuciones` | `agent.runs` | `id` y `(account_id, id)` |
+| `agente.llamadas_pendientes` | `agent.pending_calls` | — |
+| `agente.cupos_periodo` | `agent.period_quotas` | `(account_id, period_id, resource)` |
+| `agente.reservas` | `agent.reservations` | — |
+| `agente.tarifas` | `agent.rates` | `id` |
+| `agente.consumo` | `agent.usage` | — |
+| `operacion.auditoria` | `operations.audit_log` | — |
+| `operacion.copias_objetos` | `operations.object_copies` | — |
+| `operacion.ejecuciones_respaldo` | `operations.backup_runs` | — |
+
+Columnas con traducción no evidente:
+
+| Tabla | Modelo relacional | En la base |
+|---|---|---|
+| `conversations` | `titulo` | `title` |
+| `messages` | `secuencia`, `rol`, `contenido` | `sequence`, `role`, `content` |
+| `runs` | `sesion_editor_id`, `revision_inicial` | `editor_session_id`, `initial_revision` |
+| `runs` | `version_pre_agente_id`, `version_pre_agente_historica` | `pre_agent_version_id`, `recorded_pre_agent_version_id` |
+| `runs` | `modo`, `variante`, `modelo` | `mode`, `variant`, `model` |
+| `runs` | `version_prompt`, `huella_catalogo`, `lease_hasta`, `fin_at` | `prompt_version`, `catalog_fingerprint`, `lease_until`, `finished_at` |
+| `pending_calls` | `herramienta`, `huella_argumentos`, `resultado` | `tool`, `arguments_fingerprint`, `result` |
+| `period_quotas` | `periodo_id`, `recurso`, `inicio`, `fin` | `period_id`, `resource`, `starts_at`, `ends_at` |
+| `period_quotas` | `asignado`, `reservado`, `consumido` | `allocated`, `reserved`, `consumed` |
+| `reservations` | `ejecucion_id`, `cantidad` | `run_id`, `amount` |
+| `rates` | `proveedor`, `precio_entrada_micro`, `precio_salida_micro` | `provider`, `input_price_micro`, `output_price_micro` |
+| `rates` | `moneda`, `base_tokens`, `vigente_desde` | `currency`, `token_basis`, `effective_from` |
+| `usage` | `tarifa_id`, `evento_id`, `tokens_entrada`, `tokens_salida` | `rate_id`, `event_id`, `input_tokens`, `output_tokens` |
+| `usage` | `unidades`, `coste_estimado_micro`, `cobrado`, `duracion_ms` | `units`, `estimated_cost_micro`, `charged`, `duration_ms` |
+| `audit_log` | `actor_opaco`, `accion`, `entidad_tipo`, `entidad_id` | `actor_ref`, `action`, `entity_type`, `entity_id` |
+| `object_copies` | `destino`, `clave`, `bytes` | `destination`, `key`, `size_bytes` |
+| `backup_runs` | `tipo`, `inicio_at`, `manifiesto` | `type`, `started_at`, `manifest` |
+| `backup_runs` | `punto_recuperacion_at`, `resultado_verificacion` | `recovery_point_at`, `verification_result` |
+
+Estados que el modelo dejaba abiertos (§X), fijados en esta migración:
+
+| Columna | Valores |
+|---|---|
+| `runs.status` | `pending`, `running`, `completed`, `failed`, `cancelled`, `expired` (activos: los dos primeros) |
+| `runs.mode` | `platform`, `own_key` (los mismos que `accounts.agent_mode`) |
+| `reservations.status` | `reserved`, `settled` (liquidada), `released` |
+| `pending_calls.status` | `pending`, `completed`, `failed`, `expired` |
+| `messages.role` | `user`, `assistant`, `tool` |
+| `usage.result` | `success`, `error`, `cancelled` |
+| `audit_log.result` | `success`, `denied`, `error` |
+| `backup_runs.type`, `status` | `database`, `objects`; `running`, `succeeded`, `failed` |
+
+`period_quotas.resource`, `runs.variant` y `audit_log.action` quedan como texto: dependen de los planes y del
+agente, y cambiarían con cada producto nuevo.
+
+### Qué usa el agente (VEC-35)
+
+| Tabla | El servicio del agente |
+|---|---|
+| `conversations`, `messages`, `runs`, `pending_calls` | lee y escribe |
+| `usage` | lee e inserta; nunca cambia ni borra un consumo ya registrado |
+| `period_quotas`, `reservations` | solo lee; reserva y liquida con las funciones de cupos (VEC-30), que todavía no existen |
+| `rates` | solo lee |
+| `platform.*` | lee (cuenta, espacio, documento y versiones) |
+| `auth.users`, `auth.sessions` | lee, para validar la sesión con `auth.find_session()` |
+| `storage`, `billing`, `operations` | sin acceso |
+
+Al abrir cada transacción fija la cuenta con `SELECT set_config('app.account_id', $1, true)`
+([La cuenta conectada](#la-cuenta-conectada)); sin eso no ve ni escribe ninguna fila.
 
 ## Molde de una tabla
 
@@ -235,9 +306,20 @@ Así la protección no depende solo de que cada consulta esté bien escrita. Lo 
   o cambiar tablas. Lo usa Alembic y ninguna aplicación en marcha: `alembic/env.py` hace `SET ROLE` a él antes
   de migrar, así toda tabla nueva tiene el mismo dueño.
 - **`vectoredit_platform`** es la app de este repo.
-- **`vectoredit_agent`** es el agente. Créditos y cupos los cambia solo con funciones SQL autorizadas (VEC-41).
+- **`vectoredit_agent`** es el agente. Los cupos los cambia solo con funciones SQL autorizadas (VEC-30), y los
+  créditos con las de VEC-47.
   En `auth` solo lee `users` y `sessions`, lo justo para validar la sesión con `auth.find_session()`: nunca ve
   contraseñas ni enlaces de correo. Si el agente necesita otra tabla de `auth`, se le da en una migración nueva, tabla por tabla.
+
+Excepciones por tabla a esa matriz (migración `0013`, probadas en `tests/test_agent_security.py`):
+
+| Tabla | Excepción |
+|---|---|
+| `agent.period_quotas` | El agente solo la lee. La plataforma además inserta y actualiza: asigna los cupos según el plan |
+| `agent.reservations` | El agente solo la lee: reserva y libera con las funciones de cupos |
+| `agent.rates` | El agente solo la lee. La plataforma además inserta: un precio nuevo es una fila nueva, nunca se cambia uno viejo |
+| `agent.usage` | El agente inserta pero no cambia ni borra: es contabilidad |
+| `operations.audit_log` | Nadie lo cambia ni lo borra: solo se agregan entradas |
 
 Los tres son roles de grupo **sin login**. En cada entorno se crea un usuario con contraseña por servicio
 (`vectoredit_<rol>_login`), miembro de su rol, con `scripts/create_login_roles.sql`. Las contraseñas nunca van
@@ -302,6 +384,20 @@ Las tablas de `auth` no tienen RLS: se consultan antes de saber qué cuenta es (
 | `platform.workspaces` | los espacios de su cuenta (`owner_id`) | `0012` |
 | `platform.folders`, `documents`, `document_revisions`, `revision_images`, `document_versions`, `share_links` | las filas de sus espacios (`workspace_id`) | `0012` |
 | `storage.objects`, `uploads`, `saves`, `workspace_quotas`, `byte_reservations` | las filas de sus espacios (`workspace_id`) | `0012` |
+| `agent.conversations`, `runs` | las de su cuenta (`account_id`) en sus espacios | `0013` |
+| `agent.messages` | las de las conversaciones de su cuenta | `0013` |
+| `agent.pending_calls`, `usage` | las de las ejecuciones de su cuenta | `0013` |
+| `agent.period_quotas`, `reservations` | las de su cuenta (`account_id`) | `0013` |
+| `operations.object_copies` | las copias de los archivos de sus espacios | `0013` |
+| `operations.audit_log` | lee las entradas de sus espacios; **cualquier sesión puede agregar una**, con o sin cuenta | `0013` |
+
+Sin RLS, porque no tienen datos de una cuenta: `agent.rates` (precios, iguales para todos) y
+`operations.backup_runs` (respaldos globales).
+
+**`operations.audit_log` se escribe con `db.execute(insert(AuditEntry).values(...))`, nunca con `db.add()`.**
+Una entrada se puede agregar sin cuenta fijada (un inicio de sesión fallido, un enlace compartido abierto sin
+sesión), pero esa sesión no puede leerla, y PostgreSQL trata `RETURNING` como una lectura. Por eso la tabla no
+pide `RETURNING` sola (`implicit_returning=False`), y `db.add()` falla, porque necesita el id nuevo.
 
 Todas con `FORCE`. Las columnas que registran quién hizo algo (`storage.uploads.account_id`,
 `storage.saves.account_id` y `platform.document_revisions.author_account_id`) también se revisan al escribir:
@@ -312,11 +408,17 @@ Tres pruebas de `tests/test_database_security.py` cuidan que no falte ninguna:
 
 - `test_every_table_with_account_data_has_forced_rls`: toda tabla de `platform`, `storage`, `billing`, `agent`
   y `operations` tiene que tener RLS forzada y una política. Si una tabla de esos esquemas de verdad no tiene
-  datos de una cuenta (por ejemplo, un catálogo de planes), se agrega a `TABLES_WITHOUT_ACCOUNT_DATA` con el motivo.
+  datos de una cuenta (como `agent.rates`), se agrega a `TABLES_WITHOUT_ACCOUNT_DATA` con el motivo.
 - `test_every_workspace_table_is_tested`: toda tabla con `workspace_id` tiene que estar en `WORKSPACE_TABLES`,
-  así recibe las pruebas de aislamiento (y una fila en `_fill_workspace`).
+  así recibe las pruebas de aislamiento (y una fila en `_fill_workspace`). Si sigue otras reglas (como
+  `operations.audit_log`), va en `WORKSPACE_TABLES_TESTED_ELSEWHERE` y se prueba aparte.
 - `test_every_account_column_is_tested`: toda columna que apunta a `platform.accounts` tiene que estar en
-  `ACTOR_COLUMNS` (salvo `platform.workspaces.owner_id`), así se prueba que nadie la escribe a nombre de otra cuenta.
+  `ACTOR_COLUMNS` (quién hizo algo) o en `OWNER_COLUMNS` (de quién es la fila), así se prueba que nadie la
+  escribe a nombre de otra cuenta.
+
+Las tablas del agente que siguen a su padre o a la cuenta (`messages`, `pending_calls`, `usage`,
+`period_quotas`, `reservations`) y `operations.object_copies` se prueban en `tests/test_agent_security.py`,
+con una tabla de qué rol puede leer, insertar, cambiar y borrar cada una (`READERS`, `INSERTERS`, ...).
 
 Lo que RLS deja afuera **a propósito** y necesitará una función `SECURITY DEFINER` cuando llegue
 (ver [Funciones](#funciones)):
@@ -373,8 +475,9 @@ cada rol que tiene acceso).
   `FORCE` en esa migración y lo vuelve a activar al final.
 - Tablas de cupos y créditos (`billing.credit_balances`, `billing.credit_reservations`, `agent.period_quotas`,
   `agent.reservations`): además de la política, el agente no debe escribirlas directo. La migración que
-  las crea quita esos permisos (`REVOKE INSERT, UPDATE, DELETE ... FROM vectoredit_agent`) y da `EXECUTE`
-  solo sobre las funciones de reserva y descuento (VEC-41).
+  las crea quita esos permisos (`REVOKE INSERT, UPDATE, DELETE ... FROM vectoredit_agent`, como hace la `0013`
+  con los cupos) y da `EXECUTE` solo sobre las funciones de reserva y descuento (cupos en VEC-30, créditos
+  en VEC-47).
 
 ### Funciones
 

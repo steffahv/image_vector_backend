@@ -1,4 +1,6 @@
-"""Service roles, per-schema privileges and row-level security (migrations 0010 and 0012).
+"""Service roles, per-schema privileges and row-level security (migrations 0010, 0012, 0013).
+
+The agent tables without a workspace_id are in tests/test_agent_security.py.
 
 PostgreSQL skips RLS for superusers, and tests usually connect as one. So each test switches to
 the role it checks with SET LOCAL ROLE, which also ends with the test's rolled-back transaction.
@@ -44,7 +46,8 @@ from app.storage.models import (
     ByteReservationStatus,
     ObjectKind,
 )
-from tests.conftest import as_role
+from tests.agent_factories import make_conversation, make_run
+from tests.conftest import as_role, has_privilege
 from tests.factories import (
     in_one_hour,
     make_document,
@@ -62,30 +65,12 @@ AGENT_AUTH_TABLES = ("auth.users", "auth.sessions")
 AGENT_NO_ACCESS = ("storage", "billing", "operations")
 
 
-def _account(db: Session, email: str) -> Account:
-    user = AuthUser(email=email)
-    db.add(user)
-    db.flush()
-    account = Account(
-        auth_user_id=user.id, name=email, language="es", agent_mode=AgentMode.PLATFORM
-    )
-    db.add(account)
-    db.flush()
-    return account
-
-
 def _visible_account_ids(db: Session) -> set[uuid.UUID]:
     return set(db.scalars(select(Account.id)))
 
 
 def _current_setting(db: Session) -> str | None:
     return db.scalar(select(func.current_setting(ACCOUNT_ID_SETTING, True)))
-
-
-@pytest.fixture
-def two_accounts(db: Session) -> tuple[Account, Account]:
-    """Two accounts created as the test user, before switching to a restricted role."""
-    return _account(db, "ana@example.com"), _account(db, "luis@example.com")
 
 
 # Row-level security
@@ -316,20 +301,12 @@ def _tables(db: Session, schemas: tuple[str, ...]) -> list[str]:
     )
 
 
-def _has_privilege(db: Session, role: str, table: str, privilege: str) -> bool:
-    return bool(
-        db.scalar(
-            select(func.has_table_privilege(role, table, privilege)),
-        )
-    )
-
-
 def test_agent_cannot_write_platform_storage_or_billing(db: Session) -> None:
     tables = _tables(db, ("auth", "platform", "storage", "billing", "operations"))
     assert tables, "no tables to check: is the database migrated?"
     for table in tables:
         for privilege in ("INSERT", "UPDATE", "DELETE", "TRUNCATE"):
-            assert not _has_privilege(db, AGENT_ROLE, table, privilege), (table, privilege)
+            assert not has_privilege(db, AGENT_ROLE, table, privilege), (table, privilege)
 
 
 def test_agent_write_is_refused_by_the_database(
@@ -348,7 +325,7 @@ def test_agent_reads_only_users_and_sessions_in_auth(db: Session) -> None:
     assert set(AGENT_AUTH_TABLES) <= set(tables)
     for table in tables:
         expected = table in AGENT_AUTH_TABLES
-        assert _has_privilege(db, AGENT_ROLE, table, "SELECT") == expected, table
+        assert has_privilege(db, AGENT_ROLE, table, "SELECT") == expected, table
 
 
 def test_a_new_auth_table_is_not_readable_by_the_agent(db: Session) -> None:
@@ -356,8 +333,8 @@ def test_a_new_auth_table_is_not_readable_by_the_agent(db: Session) -> None:
     db.execute(text("CREATE TABLE auth.privileges_probe (id int)"))
     db.execute(text("RESET ROLE"))
 
-    assert _has_privilege(db, PLATFORM_ROLE, "auth.privileges_probe", "INSERT")
-    assert not _has_privilege(db, AGENT_ROLE, "auth.privileges_probe", "SELECT")
+    assert has_privilege(db, PLATFORM_ROLE, "auth.privileges_probe", "INSERT")
+    assert not has_privilege(db, AGENT_ROLE, "auth.privileges_probe", "SELECT")
 
 
 def test_a_new_function_is_executable_only_once_granted(db: Session) -> None:
@@ -411,12 +388,12 @@ def test_a_new_table_gets_its_privileges_with_no_manual_step(db: Session) -> Non
     db.execute(text("CREATE TABLE agent.privileges_probe (id int)"))
     db.execute(text("RESET ROLE"))
 
-    assert _has_privilege(db, PLATFORM_ROLE, "platform.privileges_probe", "INSERT")
-    assert _has_privilege(db, AGENT_ROLE, "platform.privileges_probe", "SELECT")
-    assert not _has_privilege(db, AGENT_ROLE, "platform.privileges_probe", "INSERT")
-    assert _has_privilege(db, AGENT_ROLE, "agent.privileges_probe", "INSERT")
-    assert _has_privilege(db, PLATFORM_ROLE, "agent.privileges_probe", "SELECT")
-    assert not _has_privilege(db, PLATFORM_ROLE, "agent.privileges_probe", "INSERT")
+    assert has_privilege(db, PLATFORM_ROLE, "platform.privileges_probe", "INSERT")
+    assert has_privilege(db, AGENT_ROLE, "platform.privileges_probe", "SELECT")
+    assert not has_privilege(db, AGENT_ROLE, "platform.privileges_probe", "INSERT")
+    assert has_privilege(db, AGENT_ROLE, "agent.privileges_probe", "INSERT")
+    assert has_privilege(db, PLATFORM_ROLE, "agent.privileges_probe", "SELECT")
+    assert not has_privilege(db, PLATFORM_ROLE, "agent.privileges_probe", "INSERT")
 
 
 # Row-level security of workspaces and their tables (migration 0012)
@@ -435,12 +412,20 @@ WORKSPACE_TABLES = (
     "storage.saves",
     "storage.workspace_quotas",
     "storage.byte_reservations",
+    "agent.conversations",
+    "agent.runs",
 )
+# Also have a workspace_id but follow other rules, tested in tests/test_agent_security.py:
+# anyone may add an audit entry, and it may have no workspace.
+WORKSPACE_TABLES_TESTED_ELSEWHERE = ("operations.audit_log",)
 # Schemas whose tables all hold account data. auth has none of it: it is read before the account
 # is known (sign-in, the session cookie).
 ACCOUNT_DATA_SCHEMAS = ("platform", "storage", "billing", "agent", "operations")
-# A table in those schemas with no account data (e.g. a plan catalog) goes here, with the reason.
-TABLES_WITHOUT_ACCOUNT_DATA: tuple[str, ...] = ()
+# Tables in those schemas with no account data, so with no policy:
+TABLES_WITHOUT_ACCOUNT_DATA = (
+    "agent.rates",  # provider prices, the same for every account
+    "operations.backup_runs",  # one row per global backup
+)
 
 
 def _roles_that_read(table: str) -> list[str]:
@@ -450,7 +435,17 @@ def _roles_that_read(table: str) -> list[str]:
     return [PLATFORM_ROLE, AGENT_ROLE, MIGRATOR_ROLE]
 
 
+def _roles_that_write(table: str) -> list[str]:
+    # The agent writes its own schema; the platform only reads it.
+    if table.startswith("agent."):
+        return [AGENT_ROLE, MIGRATOR_ROLE]
+    return [PLATFORM_ROLE, MIGRATOR_ROLE]
+
+
 TABLE_ROLE_CASES = [(table, role) for table in WORKSPACE_TABLES for role in _roles_that_read(table)]
+TABLE_WRITE_CASES = [
+    (table, role) for table in WORKSPACE_TABLES for role in _roles_that_write(table)
+]
 WRITE_ROLES = [PLATFORM_ROLE, MIGRATOR_ROLE]
 
 
@@ -490,7 +485,7 @@ def _fill_workspace(db: Session, account: Account) -> uuid.UUID:
             expires_at=in_one_hour(),
         )
     )
-    db.flush()
+    make_run(db, make_conversation(db, document))
     return workspace.id
 
 
@@ -549,8 +544,7 @@ def test_without_an_account_no_workspace_rows_are_visible(
     assert db.scalar(text(f"SELECT count(*) FROM {table}")) == 0
 
 
-@pytest.mark.parametrize("role", WRITE_ROLES)
-@pytest.mark.parametrize("table", WORKSPACE_TABLES)
+@pytest.mark.parametrize(("table", "role"), TABLE_WRITE_CASES)
 def test_an_account_cannot_change_or_delete_another_workspace_rows(
     db: Session, two_workspaces: tuple[uuid.UUID, uuid.UUID], table: str, role: str
 ) -> None:
@@ -566,8 +560,7 @@ def test_an_account_cannot_change_or_delete_another_workspace_rows(
     assert deleted.rowcount == 0
 
 
-@pytest.mark.parametrize("role", WRITE_ROLES)
-@pytest.mark.parametrize("table", WORKSPACE_TABLES)
+@pytest.mark.parametrize(("table", "role"), TABLE_WRITE_CASES)
 def test_a_row_cannot_be_moved_to_another_account_workspace(
     db: Session, two_workspaces: tuple[uuid.UUID, uuid.UUID], table: str, role: str
 ) -> None:
@@ -627,6 +620,14 @@ ACTOR_COLUMNS = {
     "platform.document_revisions": "author_account_id",
     "storage.uploads": "account_id",
     "storage.saves": "account_id",
+}
+
+
+# Columns that say which account a row belongs to (not who acted).
+OWNER_COLUMNS = {
+    ("platform.workspaces", "owner_id"),
+    ("agent.conversations", "account_id"),
+    ("agent.period_quotas", "account_id"),
 }
 
 
@@ -704,8 +705,9 @@ def test_a_revision_can_have_no_author(db: Session, two_accounts: tuple[Account,
 
 
 def test_every_account_column_is_tested(db: Session) -> None:
-    # A new column pointing to an account must say who may write it. workspaces.owner_id is
-    # covered by the workspace tests above.
+    # A new column pointing to an account must say who may write it. The owner columns are
+    # covered by the isolation tests: workspaces above, conversations here and period quotas in
+    # tests/test_agent_security.py.
     account_columns = db.execute(
         text(
             "SELECT c.conrelid::regclass::text, a.attname FROM pg_constraint c"
@@ -716,9 +718,7 @@ def test_every_account_column_is_tested(db: Session) -> None:
         ),
         {"schemas": list(ACCOUNT_DATA_SCHEMAS)},
     ).all()
-    assert set(map(tuple, account_columns)) - {("platform.workspaces", "owner_id")} == set(
-        ACTOR_COLUMNS.items()
-    )
+    assert set(map(tuple, account_columns)) - OWNER_COLUMNS == set(ACTOR_COLUMNS.items())
 
 
 @pytest.mark.parametrize(
@@ -731,8 +731,7 @@ def test_agent_reading_storage_gets_permission_denied(db: Session, table: str) -
         db.execute(text(f"SELECT 1 FROM {table} LIMIT 1"))
 
 
-@pytest.mark.parametrize("role", WRITE_ROLES)
-@pytest.mark.parametrize("table", WORKSPACE_TABLES)
+@pytest.mark.parametrize(("table", "role"), TABLE_WRITE_CASES)
 def test_an_account_cannot_insert_rows_into_another_workspace(
     db: Session, two_workspaces: tuple[uuid.UUID, uuid.UUID], table: str, role: str
 ) -> None:
@@ -779,7 +778,7 @@ def test_every_workspace_table_is_tested(db: Session) -> None:
         ),
         {"schemas": list(ACCOUNT_DATA_SCHEMAS)},
     ).all()
-    assert set(with_workspace_id) == set(WORKSPACE_TABLES)
+    assert set(with_workspace_id) == set(WORKSPACE_TABLES) | set(WORKSPACE_TABLES_TESTED_ELSEWHERE)
 
 
 # Real login users (created in CI by scripts/create_login_roles.sql)

@@ -18,7 +18,7 @@ Los archivos pesados (el JSON del diseño y las imágenes) no van en la base: va
 El navegador sube y baja archivos directo al bucket con URLs firmadas que caducan en 10 minutos como máximo.
 
 La base tiene seis esquemas, definidos en `Modelo_relacional_VectorEdit` (allí con nombres en español);
-la migración `0002` los crea vacíos; las tablas llegan con VEC-29 (`auth`, `platform`, `storage`) y VEC-41 (`billing`, `agent`, `operations`). Cómo escribirlas: [base-de-datos.md](base-de-datos.md).
+la migración `0002` los crea vacíos; las tablas llegan con VEC-29 (`auth`, `platform`, `storage`) y VEC-41 (`agent`, `operations`), VEC-47 (`billing`) y VEC-36 (`operations.jobs`). Cómo escribirlas: [base-de-datos.md](base-de-datos.md).
 
 | Esquema | Módulo que lo maneja |
 |---|---|
@@ -40,7 +40,7 @@ El código se ordena por tema del negocio, no por tipo de archivo. Cada tema es 
 | `auth/` | Inicio de sesión (enlace por correo y Google) y sesión con cookie; la primera vez crea la cuenta. Expone `get_current_user` para que los demás módulos sepan quién llama. El agente valida la sesión que emite este módulo. | VEC-4, VEC-40 |
 | `documents/` | La ficha de cada documento y sus permisos: crear, abrir, guardar sin perder ni pisar cambios, versiones, carpetas, papelera y compartir. | VEC-29, 31, 42, 43 |
 | `storage/` | Los bytes: cliente S3, URLs firmadas, validación de lo subido y cuotas de espacio. Es el único módulo que habla con S3. | VEC-29, 31, 42 |
-| `billing/` | Planes, pagos, suscripciones y créditos que reserva el agente. Llega después del lanzamiento. | VEC-33, VEC-41 |
+| `billing/` | Planes, pagos, suscripciones y créditos que reserva el agente. Llega después del lanzamiento. | VEC-33, VEC-47 |
 | `agent/` | Solo las tablas del esquema `agent`. Las escribe el servicio del agente (TypeScript); aquí se definen para que Alembic siga siendo el único que migra. Sin rutas ni lógica. | VEC-41 |
 | `jobs/` | Tareas que el backend hace solo: vaciar papelera vieja, podar versiones, borrar archivos sin uso, liberar cupos de guardados cortados. Corre como proceso aparte, sin Redis ni colas. | VEC-36 |
 
