@@ -1,9 +1,10 @@
-"""Service roles, per-schema privileges and row-level security (migration 0010).
+"""Service roles, per-schema privileges and row-level security (migrations 0010 and 0012).
 
 PostgreSQL skips RLS for superusers, and tests usually connect as one. So each test switches to
 the role it checks with SET LOCAL ROLE, which also ends with the test's rolled-back transaction.
 """
 
+import json
 import os
 import uuid
 
@@ -27,8 +28,33 @@ from app.core.db import (
     set_current_account,
     set_current_user,
 )
-from app.documents.models import Account, AgentMode
+from app.documents.models import (
+    Account,
+    AgentMode,
+    DocumentVersion,
+    Folder,
+    RevisionImage,
+    VersionSource,
+    Workspace,
+    WorkspaceType,
+)
+from app.storage.models import (
+    ByteReservation,
+    ByteReservationStatus,
+    ObjectKind,
+)
 from tests.conftest import as_role
+from tests.factories import (
+    in_one_hour,
+    make_document,
+    make_object,
+    make_quota,
+    make_revision,
+    make_save,
+    make_share_link,
+    make_upload,
+    make_workspace,
+)
 
 SCHEMAS = ("auth", "platform", "storage", "billing", "agent", "operations")
 AGENT_AUTH_TABLES = ("auth.users", "auth.sessions")
@@ -390,6 +416,268 @@ def test_a_new_table_gets_its_privileges_with_no_manual_step(db: Session) -> Non
     assert _has_privilege(db, AGENT_ROLE, "agent.privileges_probe", "INSERT")
     assert _has_privilege(db, PLATFORM_ROLE, "agent.privileges_probe", "SELECT")
     assert not _has_privilege(db, PLATFORM_ROLE, "agent.privileges_probe", "INSERT")
+
+
+# Row-level security of workspaces and their tables (migration 0012)
+
+# Every table with a workspace_id. test_every_workspace_table_is_tested fails if one is missing,
+# so a new table cannot skip these scenarios.
+WORKSPACE_TABLES = (
+    "platform.folders",
+    "platform.documents",
+    "platform.document_revisions",
+    "platform.revision_images",
+    "platform.document_versions",
+    "platform.share_links",
+    "storage.objects",
+    "storage.uploads",
+    "storage.saves",
+    "storage.workspace_quotas",
+    "storage.byte_reservations",
+)
+# Schemas whose tables all hold account data. auth has none of it: it is read before the account
+# is known (sign-in, the session cookie).
+ACCOUNT_DATA_SCHEMAS = ("platform", "storage", "billing", "agent", "operations")
+# A table in those schemas with no account data (e.g. a plan catalog) goes here, with the reason.
+TABLES_WITHOUT_ACCOUNT_DATA: tuple[str, ...] = ()
+
+
+def _roles_that_read(table: str) -> list[str]:
+    # The agent reads platform but has no access to storage (tested above).
+    if table.startswith("storage."):
+        return [PLATFORM_ROLE, MIGRATOR_ROLE]
+    return [PLATFORM_ROLE, AGENT_ROLE, MIGRATOR_ROLE]
+
+
+TABLE_ROLE_CASES = [(table, role) for table in WORKSPACE_TABLES for role in _roles_that_read(table)]
+WRITE_ROLES = [PLATFORM_ROLE, MIGRATOR_ROLE]
+
+
+def _fill_workspace(db: Session, account: Account) -> uuid.UUID:
+    """A workspace with one row in every table of WORKSPACE_TABLES. Returns its id."""
+    workspace = make_workspace(db, account)
+    db.add(Folder(workspace_id=workspace.id, name="Clients"))
+    document = make_document(db, workspace)
+    image = make_object(db, workspace, ObjectKind.IMAGE)
+    make_revision(db, document, make_object(db, workspace))
+    db.add(
+        RevisionImage(
+            workspace_id=workspace.id,
+            document_id=document.id,
+            revision=1,
+            editor_hash="img-1",
+            image_object_id=image.id,
+        )
+    )
+    db.add(
+        DocumentVersion(
+            workspace_id=workspace.id,
+            document_id=document.id,
+            revision=1,
+            source=VersionSource.MANUAL,
+        )
+    )
+    make_share_link(db, document, token=str(workspace.id))
+    make_save(db, document)
+    make_quota(db, workspace)
+    db.add(
+        ByteReservation(
+            workspace_id=workspace.id,
+            upload_id=make_upload(db, workspace).id,
+            amount=10,
+            status=ByteReservationStatus.RESERVED,
+            expires_at=in_one_hour(),
+        )
+    )
+    db.flush()
+    return workspace.id
+
+
+@pytest.fixture
+def two_workspaces(
+    db: Session, two_accounts: tuple[Account, Account]
+) -> tuple[uuid.UUID, uuid.UUID]:
+    """The ids of Ana's and Luis's workspaces, each with a row in every workspace table."""
+    ana, luis = two_accounts
+    return _fill_workspace(db, ana), _fill_workspace(db, luis)
+
+
+def _workspace_owner(db: Session, workspace_id: uuid.UUID) -> uuid.UUID:
+    owner = db.scalar(select(Workspace.owner_id).where(Workspace.id == workspace_id))
+    assert owner is not None
+    return owner
+
+
+def _act_for_ana(
+    db: Session, workspaces: tuple[uuid.UUID, uuid.UUID], role: str
+) -> tuple[uuid.UUID, uuid.UUID]:
+    """Switch to `role` acting for Ana. Her id is read first, as the superuser."""
+    ana_workspace, luis_workspace = workspaces
+    ana_id = _workspace_owner(db, ana_workspace)
+    as_role(db, role)
+    set_current_account(db, ana_id)
+    return ana_workspace, luis_workspace
+
+
+def _visible_workspace_ids(db: Session, table: str) -> set[uuid.UUID]:
+    # `table` comes from WORKSPACE_TABLES, a constant of this file.
+    return set(db.scalars(text(f"SELECT DISTINCT workspace_id FROM {table}")))
+
+
+@pytest.mark.parametrize("role", [PLATFORM_ROLE, AGENT_ROLE, MIGRATOR_ROLE])
+def test_each_account_sees_only_its_own_workspaces(
+    db: Session, two_workspaces: tuple[uuid.UUID, uuid.UUID], role: str
+) -> None:
+    ana_workspace, _ = _act_for_ana(db, two_workspaces, role)
+    assert set(db.scalars(select(Workspace.id))) == {ana_workspace}
+
+
+@pytest.mark.parametrize(("table", "role"), TABLE_ROLE_CASES)
+def test_each_account_sees_only_its_workspace_rows(
+    db: Session, two_workspaces: tuple[uuid.UUID, uuid.UUID], table: str, role: str
+) -> None:
+    ana_workspace, _ = _act_for_ana(db, two_workspaces, role)
+    assert _visible_workspace_ids(db, table) == {ana_workspace}
+
+
+@pytest.mark.parametrize("table", ("platform.workspaces", *WORKSPACE_TABLES))
+def test_without_an_account_no_workspace_rows_are_visible(
+    db: Session, two_workspaces: tuple[uuid.UUID, uuid.UUID], table: str
+) -> None:
+    as_role(db, PLATFORM_ROLE)
+    assert db.scalar(text(f"SELECT count(*) FROM {table}")) == 0
+
+
+@pytest.mark.parametrize("role", WRITE_ROLES)
+@pytest.mark.parametrize("table", WORKSPACE_TABLES)
+def test_an_account_cannot_change_or_delete_another_workspace_rows(
+    db: Session, two_workspaces: tuple[uuid.UUID, uuid.UUID], table: str, role: str
+) -> None:
+    _, luis_workspace = _act_for_ana(db, two_workspaces, role)
+    where = {"luis": luis_workspace}
+
+    updated = db.execute(
+        text(f"UPDATE {table} SET workspace_id = workspace_id WHERE workspace_id = :luis"), where
+    )
+    deleted = db.execute(text(f"DELETE FROM {table} WHERE workspace_id = :luis"), where)
+
+    assert updated.rowcount == 0
+    assert deleted.rowcount == 0
+
+
+@pytest.mark.parametrize("role", WRITE_ROLES)
+@pytest.mark.parametrize("table", WORKSPACE_TABLES)
+def test_a_row_cannot_be_moved_to_another_account_workspace(
+    db: Session, two_workspaces: tuple[uuid.UUID, uuid.UUID], table: str, role: str
+) -> None:
+    ana_workspace, luis_workspace = _act_for_ana(db, two_workspaces, role)
+
+    with pytest.raises(ProgrammingError, match="row-level security policy"):
+        db.execute(
+            text(f"UPDATE {table} SET workspace_id = :luis WHERE workspace_id = :ana"),
+            {"luis": luis_workspace, "ana": ana_workspace},
+        )
+
+
+@pytest.mark.parametrize("role", WRITE_ROLES)
+def test_a_workspace_cannot_be_given_to_another_account(
+    db: Session, two_workspaces: tuple[uuid.UUID, uuid.UUID], role: str
+) -> None:
+    ana_workspace, luis_workspace = two_workspaces
+    luis_id = _workspace_owner(db, luis_workspace)
+    _act_for_ana(db, two_workspaces, role)
+
+    with pytest.raises(ProgrammingError, match="row-level security policy"):
+        db.execute(update(Workspace).where(Workspace.id == ana_workspace).values(owner_id=luis_id))
+
+
+def test_an_account_cannot_create_a_workspace_for_another(
+    db: Session, two_accounts: tuple[Account, Account]
+) -> None:
+    ana, luis = two_accounts
+    as_role(db, PLATFORM_ROLE)
+    set_current_account(db, ana.id)
+
+    db.add(Workspace(owner_id=luis.id, name="Not mine", type=WorkspaceType.PERSONAL))
+    with pytest.raises(ProgrammingError, match="row-level security policy"):
+        db.flush()
+
+
+def test_an_account_can_fill_its_own_new_workspace(
+    db: Session, two_accounts: tuple[Account, Account]
+) -> None:
+    ana, _ = two_accounts
+    as_role(db, PLATFORM_ROLE)
+    set_current_account(db, ana.id)
+
+    workspace = Workspace(owner_id=ana.id, name="Personal", type=WorkspaceType.PERSONAL)
+    db.add(workspace)
+    db.flush()
+    db.add(Folder(workspace_id=workspace.id, name="Clients"))
+    db.flush()
+
+    assert set(db.scalars(select(Folder.workspace_id))) == {workspace.id}
+
+
+@pytest.mark.parametrize(
+    "table", [table for table in WORKSPACE_TABLES if table.startswith("storage.")]
+)
+def test_agent_reading_storage_gets_permission_denied(db: Session, table: str) -> None:
+    # An empty result could also be RLS hiding rows; the agent must be refused outright.
+    as_role(db, AGENT_ROLE)
+    with pytest.raises(ProgrammingError, match="permission denied for schema storage"):
+        db.execute(text(f"SELECT 1 FROM {table} LIMIT 1"))
+
+
+@pytest.mark.parametrize("role", WRITE_ROLES)
+@pytest.mark.parametrize("table", WORKSPACE_TABLES)
+def test_an_account_cannot_insert_rows_into_another_workspace(
+    db: Session, two_workspaces: tuple[uuid.UUID, uuid.UUID], table: str, role: str
+) -> None:
+    ana_workspace, luis_workspace = two_workspaces
+    # A copy of one of Ana's rows, pointed at Luis's workspace. Read as the superuser first.
+    # PostgreSQL checks the policy before unique keys and CHECKs, so the copy needs no new ids.
+    row = db.scalar(
+        text(f"SELECT to_jsonb(t) FROM {table} t WHERE workspace_id = :ana LIMIT 1"),
+        {"ana": ana_workspace},
+    )
+    assert row is not None
+    row["workspace_id"] = str(luis_workspace)
+    _act_for_ana(db, two_workspaces, role)
+
+    with pytest.raises(ProgrammingError, match="row-level security policy"):
+        db.execute(
+            text(
+                f"INSERT INTO {table}"
+                f" SELECT * FROM jsonb_populate_record(NULL::{table}, CAST(:row AS jsonb))"
+            ),
+            {"row": json.dumps(row)},
+        )
+
+
+def test_every_table_with_account_data_has_forced_rls(db: Session) -> None:
+    unprotected = db.scalars(
+        text(
+            "SELECT n.nspname || '.' || c.relname FROM pg_class c"
+            " JOIN pg_namespace n ON n.oid = c.relnamespace"
+            " WHERE c.relkind IN ('r', 'p') AND n.nspname = ANY(:schemas)"
+            " AND NOT (c.relrowsecurity AND c.relforcerowsecurity"
+            "          AND EXISTS (SELECT 1 FROM pg_policy p WHERE p.polrelid = c.oid))"
+        ),
+        {"schemas": list(ACCOUNT_DATA_SCHEMAS)},
+    ).all()
+    assert set(unprotected) - set(TABLES_WITHOUT_ACCOUNT_DATA) == set()
+
+
+def test_every_workspace_table_is_tested(db: Session) -> None:
+    with_workspace_id = db.scalars(
+        text(
+            "SELECT table_schema || '.' || table_name FROM information_schema.columns"
+            " WHERE column_name = 'workspace_id' AND table_schema = ANY(:schemas)"
+        ),
+        {"schemas": list(ACCOUNT_DATA_SCHEMAS)},
+    ).all()
+    assert set(with_workspace_id) == set(WORKSPACE_TABLES)
 
 
 # Real login users (created in CI by scripts/create_login_roles.sql)
