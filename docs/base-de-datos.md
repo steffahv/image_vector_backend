@@ -98,8 +98,8 @@ Columnas de VEC-29 con traducción no evidente:
 
 ### Tablas de VEC-41 (`agent` y `operations`)
 
-Migración `0013`. Faltan `operations.jobs` (VEC-36) y `operations.exports`, que apunta a un trabajo y llega
-cuando exista `jobs`. Las tablas de `billing` son de VEC-47.
+La migración `0013` crea las tablas de agente y operación. La migración `0017` agrega
+`operations.exports` sobre la cola de VEC-36. Las tablas de `billing` son de VEC-47.
 
 | Modelo relacional | En la base | Clave que se referencia |
 |---|---|---|
@@ -114,6 +114,7 @@ cuando exista `jobs`. Las tablas de `billing` son de VEC-47.
 | `operacion.auditoria` | `operations.audit_log` | — |
 | `operacion.copias_objetos` | `operations.object_copies` | — |
 | `operacion.ejecuciones_respaldo` | `operations.backup_runs` | — |
+| `operacion.exportaciones` | `operations.exports` | Una fila por `job_id` |
 
 Columnas con traducción no evidente:
 
@@ -209,6 +210,31 @@ gratuito usan 10 y los de los planes de pago usan 50. Para cambiar los derechos 
 `billing.service.version_limit(db, account_id)` usa la versión fijada en una suscripción vigente, de
 prueba o en gracia por impago. Si hay varias suscripciones válidas, usa el mayor límite. Devuelve
 10 si no hay una suscripción visible y vigente. La sesión debe tener fijada la cuenta antes de llamarlo.
+
+### Cola de trabajos (VEC-36)
+
+La migración `0016` crea `operations.jobs` (`operacion.trabajos` en el modelo). La clave
+`(workspace_id, id)` permite que `operations.exports` referencie un trabajo de su mismo espacio.
+Un trabajo sin `workspace_id` es global. La clave de idempotencia es única y la cola la prefija
+con el ID del espacio o con `global`. Los trabajos de un espacio se eliminan en cascada al
+borrar ese espacio. La retención automática solo elimina trabajos programados en estado terminal.
+
+| Modelo relacional | En la base |
+|---|---|
+| `tipo`, `clave_idempotencia`, `carga` | `type`, `idempotency_key`, `payload` |
+| `intentos`, `proxima_ejecucion_at` | `attempts`, `next_run_at` |
+| `lease_hasta`, `error_codigo` | `lease_until`, `error_code` |
+
+La exportación apunta a un trabajo `generate_export` mediante `(workspace_id, job_id)`. Su
+archivo final es opcional hasta quedar `completed`. La FK `(workspace_id, object_id)` protege
+ese archivo mientras la exportación lo referencia. El worker vence las exportaciones por espacio
+cada hora y deja `object_id` vacío en estado `expired`. Los archivos se retiran por separado mediante
+la limpieza de almacenamiento. La cuenta, el trabajo y el archivo deben
+pertenecer al mismo espacio de la cuenta. El borrado del espacio elimina sus exportaciones y
+trabajos dependientes, y la retención de la cola conserva los trabajos de exportación.
+
+Los estados de un trabajo son `pending`, `running`, `completed`, `failed` y `cancelled`. Solo un trabajo
+`running` tiene lease. Hay índices por estado y próxima ejecución o vencimiento del lease.
 
 ## Molde de una tabla
 
@@ -352,7 +378,7 @@ Así la protección no depende solo de que cada consulta esté bien escrita. Lo 
   En `auth` solo lee `users` y `sessions`, lo justo para validar la sesión con `auth.find_session()`: nunca ve
   contraseñas ni enlaces de correo. Si el agente necesita otra tabla de `auth`, se le da en una migración nueva, tabla por tabla.
 
-Excepciones por tabla de las migraciones `0013` y `0015`, cubiertas por las pruebas de seguridad.
+Excepciones por tabla de las migraciones de agente, billing y operaciones, cubiertas por pruebas de seguridad.
 
 | Tabla | Excepción |
 |---|---|
@@ -365,10 +391,17 @@ Excepciones por tabla de las migraciones `0013` y `0015`, cubiertas por las prue
 | `billing.credit_balances` | La plataforma lee. Las funciones abren el saldo y lo modifican |
 | `billing.credit_movements` | La plataforma lee. Las funciones agregan movimientos junto con el cambio de saldo |
 | `billing.credit_reservations` | La plataforma solo lee. Las funciones crean y liquidan reservas |
+| `operations.jobs` | La API encola y lee trabajos del espacio. Solo el worker puede borrar filas por retención |
+| `operations.exports` | La plataforma y el worker con la cuenta fijada acceden a las exportaciones de sus espacios |
 
 Los tres son roles de grupo **sin login**. En cada entorno se crea un usuario con contraseña por servicio
 (`vectoredit_<rol>_login`), miembro de su rol, con `scripts/create_login_roles.sql`. Las contraseñas nunca van
 al repo y cada servicio tiene las suyas. Cómo crearlos en tu base local: [desarrollo.md](desarrollo.md#roles-en-tu-base-local).
+
+El login del worker hereda los permisos de plataforma a través de `vectoredit_worker`. Su política
+adicional le da acceso a la cola y le permite enumerar espacios cuando aún no ha fijado una cuenta.
+Cada trabajo de un espacio se ejecuta con la cuenta dueña de ese espacio y las políticas normales
+de documentos y almacenamiento. El login se crea con [el script del worker](desarrollo.md#worker-de-mantenimiento).
 
 Salvo esa excepción en `auth`, los permisos se dan **por esquema**, no tabla por tabla, y con `ALTER DEFAULT PRIVILEGES`: una tabla que el
 migrador cree después recibe sola los permisos de la tabla de arriba. Para cambiar quién accede a un esquema,
@@ -436,6 +469,8 @@ Las tablas de `auth` no tienen RLS: se consultan antes de saber qué cuenta es (
 | `operations.object_copies` | las copias de los archivos de sus espacios | `0013` |
 | `operations.audit_log` | lee las entradas de sus espacios. Una sesión **sin cuenta** puede agregar una en cualquier espacio; **con cuenta**, solo en los suyos (o sin espacio) | `0013` |
 | `billing.subscriptions`, `credit_balances`, `credit_movements`, `credit_reservations` | las filas de su cuenta | `0015` |
+| `operations.jobs` | los trabajos de sus espacios. El worker también ve los trabajos globales | `0016` |
+| `operations.exports` | sus exportaciones en sus espacios | `0017` |
 
 Los catálogos `billing.plans`, `billing.plan_entitlements`, `billing.credit_packs` y `agent.rates`
 son globales, igual que `operations.backup_runs`. `billing.gateway_events` también es global
@@ -475,8 +510,8 @@ Lo que RLS deja afuera **a propósito**, y que necesitará su propio camino cuan
 - **Abrir un enlace compartido** sin sesión: quien lo abre no tiene cuenta, así que no ve `platform.share_links`
   ni el documento. Lo que se agregue tiene que buscar el enlace por el hash del token y devolver solo lo que el
   enlace permite.
-- **Tareas de limpieza** que recorren todas las cuentas (subidas, reservas y llamadas vencidas, verificación de
-  copias): sin cuenta fijada no ven nada.
+- **Tareas de limpieza** que recorren todas las cuentas. El worker enumera los espacios y fija la
+  cuenta al ejecutar el trabajo de cada espacio.
 
 ### Política de una tabla nueva
 

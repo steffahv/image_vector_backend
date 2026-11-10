@@ -27,6 +27,7 @@ jobs:
       # Throwaway passwords for the CI database only.
       MIGRATOR_DATABASE_URL: postgresql+psycopg://vectoredit_migrator_login:migrator_ci@localhost:5432/image_vector_ci
       AGENT_DATABASE_URL: postgresql+psycopg://vectoredit_agent_login:agent_ci@localhost:5432/image_vector_ci
+      WORKER_DATABASE_URL: postgresql+psycopg://vectoredit_worker_login:worker_ci@localhost:5432/image_vector_ci
       PGPASSWORD: ci
     steps:
       - uses: actions/checkout@v4
@@ -48,6 +49,10 @@ jobs:
           psql -h localhost -U ci -d image_vector_ci -v ON_ERROR_STOP=1
           -v migrator_password=migrator_ci -v platform_password=platform_ci
           -v agent_password=agent_ci -f scripts/create_login_roles.sql
+      - name: Create jobs worker login
+        run: >-
+          psql -h localhost -U ci -d image_vector_ci -v ON_ERROR_STOP=1
+          -v worker_password=worker_ci -f scripts/create_worker_role.sql
       - name: Migrations as the migrator (not a superuser)
         run: alembic check
         env:

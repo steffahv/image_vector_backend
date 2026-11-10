@@ -42,7 +42,7 @@ El código se ordena por tema del negocio, no por tipo de archivo. Cada tema es 
 | `storage/` | Los bytes: cliente S3, URLs firmadas, validación de lo subido y cuotas de espacio. Es el único módulo que habla con S3. | VEC-29, 31, 42 |
 | `billing/` | Planes, pagos, suscripciones y créditos que reserva el agente. Llega después del lanzamiento. | VEC-33, VEC-47 |
 | `agent/` | Solo las tablas del esquema `agent`. Las escribe el servicio del agente (TypeScript); aquí se definen para que Alembic siga siendo el único que migra. Sin rutas ni lógica. | VEC-41 |
-| `jobs/` | Tareas que el backend hace solo: vaciar papelera vieja, podar versiones, borrar archivos sin uso, liberar cupos de guardados cortados. Corre como proceso aparte, sin Redis ni colas. | VEC-36 |
+| `jobs/` | Cola de mantenimiento en PostgreSQL. Un proceso separado de la misma aplicación reclama trabajos y llama a los servicios que poseen los datos. | VEC-36 |
 
 ### Documents y storage: en qué se diferencian
 

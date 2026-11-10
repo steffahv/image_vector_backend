@@ -27,6 +27,7 @@ from app.core.config import get_settings
 MIGRATOR_ROLE = "vectoredit_migrator"
 PLATFORM_ROLE = "vectoredit_platform"
 AGENT_ROLE = "vectoredit_agent"
+WORKER_ROLE = "vectoredit_worker"
 
 # PostgreSQL setting read by platform.current_account_id(), which every RLS policy uses.
 # The TypeScript agent sets the same one.
@@ -123,21 +124,22 @@ def set_current_user(db: Session, auth_user_id: uuid.UUID | None) -> None:
     _set_identity(db, "user_id", auth_user_id)
 
 
-def check_app_role(connection: Connection) -> None:
+def check_app_role(connection: Connection, *, worker: bool = False) -> None:
     """Refuse to run as a database user that skips row-level security or can change tables.
 
     A superuser or a BYPASSRLS user skips every policy, and the migrator owns the tables: with any
     of them the app would work normally while no policy protects anything. The app must connect
-    as a member of the platform role and nothing more.
+    as a member of the platform role. Only the jobs process uses the worker login.
     """
     row = connection.execute(
         text(
             "SELECT r.rolname, r.rolsuper, r.rolbypassrls,"
             " pg_has_role(r.oid, :migrator, 'MEMBER') AS is_migrator,"
-            " pg_has_role(r.oid, :platform, 'MEMBER') AS is_platform"
+            " pg_has_role(r.oid, :platform, 'MEMBER') AS is_platform,"
+            " coalesce(pg_has_role(r.oid, to_regrole(:worker), 'MEMBER'), false) AS is_worker"
             " FROM pg_roles r WHERE r.rolname = current_user"
         ),
-        {"migrator": MIGRATOR_ROLE, "platform": PLATFORM_ROLE},
+        {"migrator": MIGRATOR_ROLE, "platform": PLATFORM_ROLE, "worker": WORKER_ROLE},
     ).one()
     if row.rolsuper or row.rolbypassrls:
         problem = "is a superuser or has BYPASSRLS, so row-level security does not apply"
@@ -145,11 +147,15 @@ def check_app_role(connection: Connection) -> None:
         problem = f"is a member of {MIGRATOR_ROLE}, which owns the tables"
     elif not row.is_platform:
         problem = f"is not a member of {PLATFORM_ROLE}"
+    elif worker and not row.is_worker:
+        problem = f"is not a member of {WORKER_ROLE}"
+    elif not worker and row.is_worker:
+        problem = f"is a member of {WORKER_ROLE}, which is reserved for the jobs process"
     else:
         return
+    roles = f"{PLATFORM_ROLE} and {WORKER_ROLE}" if worker else PLATFORM_ROLE
     raise RuntimeError(
-        f"Database user {row.rolname!r} {problem}. Outside development, DATABASE_URL must be"
-        f" a login user of {PLATFORM_ROLE} (see scripts/create_login_roles.sql)."
+        f"Database user {row.rolname!r} {problem}. DATABASE_URL must be a login user of {roles}."
     )
 
 
