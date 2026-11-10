@@ -303,6 +303,32 @@ def test_an_audit_entry_can_be_added_with_no_account(db: Session) -> None:
     assert db.scalar(select(func.count()).select_from(AuditEntry)) == 2
 
 
+@pytest.mark.parametrize("role", [PLATFORM_ROLE, MIGRATOR_ROLE])
+def test_an_account_cannot_add_an_audit_entry_to_another_workspace(
+    db: Session, two_owners: tuple[AgentRows, AgentRows], role: str
+) -> None:
+    # Otherwise Ana's session could plant "Luis deleted a document" in Luis's log.
+    ana, luis = two_owners
+    _act_for(db, ana, role)
+
+    with pytest.raises(ProgrammingError, match="row-level security policy"):
+        _add_audit_entry(db, luis.workspace_id)
+
+
+def test_an_account_adds_audit_entries_to_its_own_workspace(
+    db: Session, two_owners: tuple[AgentRows, AgentRows]
+) -> None:
+    ana, _ = two_owners
+    _act_for(db, ana, PLATFORM_ROLE)
+
+    _add_audit_entry(db, ana.workspace_id)
+    _add_audit_entry(db, None)
+
+    db.execute(text("RESET ROLE"))
+    added = select(func.count()).select_from(AuditEntry).where(AuditEntry.action == "sign_in")
+    assert db.scalar(added) == 2
+
+
 def test_an_audit_entry_cannot_be_read_back_with_no_account(db: Session) -> None:
     # RETURNING counts as reading the new row, which a session with no account may not do.
     as_role(db, PLATFORM_ROLE)

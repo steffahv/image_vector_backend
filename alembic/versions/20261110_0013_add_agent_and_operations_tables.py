@@ -8,7 +8,8 @@ Row-level security, as in migration 0012, on every table with account data:
 - messages (by conversation), pending_calls and usage (by run): those of the session's account.
 - period_quotas and reservations: the session's account.
 - object_copies: copies of the files of the account's workspaces.
-- audit_log: any session may add an entry; it reads only those of its own workspaces.
+- audit_log: it reads only the entries of its own workspaces. A session with no account may add
+  an entry anywhere; one with an account only in its own workspaces.
 rates and backup_runs are global and hold no account data, so they have no policy.
 
 Privileges narrower than the schema defaults of migration 0010:
@@ -49,6 +50,12 @@ OF_OWN_CONVERSATION = (
 OF_OWN_RUN = (
     "run_id IN (SELECT r.id FROM agent.runs r WHERE r.account_id = platform.current_account_id())"
 )
+# Audit entries: a session with no account (a failed sign-in, an anonymous share link) may add
+# one to any workspace, but a session with an account only to its own workspaces, so it cannot
+# plant an entry in another account's log.
+AUDIT_APPEND = (
+    f"workspace_id IS NULL OR platform.current_account_id() IS NULL OR {IN_OWN_WORKSPACE}"
+)
 OF_OWN_OBJECT = (
     f"object_id IN (SELECT o.id FROM storage.objects o WHERE o.workspace_id IN ({OWN_WORKSPACES}))"
 )
@@ -81,10 +88,13 @@ def _enable_row_level_security() -> None:
         op.execute(f"ALTER TABLE {table} FORCE ROW LEVEL SECURITY")
         op.execute(f"CREATE POLICY account_isolation ON {table} USING ({rule}) WITH CHECK ({rule})")
     # Audit entries are written in contexts with no account (a failed sign-in, an anonymous
-    # share link), so any session may add one; reading stays limited to its own workspaces.
+    # share link), so any session may add one (see AUDIT_APPEND); reading stays limited to its
+    # own workspaces.
     op.execute("ALTER TABLE operations.audit_log ENABLE ROW LEVEL SECURITY")
     op.execute("ALTER TABLE operations.audit_log FORCE ROW LEVEL SECURITY")
-    op.execute("CREATE POLICY audit_append ON operations.audit_log FOR INSERT WITH CHECK (true)")
+    op.execute(
+        f"CREATE POLICY audit_append ON operations.audit_log FOR INSERT WITH CHECK ({AUDIT_APPEND})"
+    )
     op.execute(
         f"CREATE POLICY account_isolation ON operations.audit_log FOR SELECT"
         f" USING ({IN_OWN_WORKSPACE})"

@@ -389,7 +389,7 @@ Las tablas de `auth` no tienen RLS: se consultan antes de saber qué cuenta es (
 | `agent.pending_calls`, `usage` | las de las ejecuciones de su cuenta | `0013` |
 | `agent.period_quotas`, `reservations` | las de su cuenta (`account_id`) | `0013` |
 | `operations.object_copies` | las copias de los archivos de sus espacios | `0013` |
-| `operations.audit_log` | lee las entradas de sus espacios; **cualquier sesión puede agregar una**, con o sin cuenta | `0013` |
+| `operations.audit_log` | lee las entradas de sus espacios. Una sesión **sin cuenta** puede agregar una en cualquier espacio; **con cuenta**, solo en los suyos (o sin espacio) | `0013` |
 
 Sin RLS, porque no tienen datos de una cuenta: `agent.rates` (precios, iguales para todos) y
 `operations.backup_runs` (respaldos globales).
