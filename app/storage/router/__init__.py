@@ -16,4 +16,7 @@ included below with `router.include_router(...)`. `app/health/router/` is an exa
 
 from fastapi import APIRouter
 
+from app.storage.router import quota
+
 router = APIRouter(prefix="/storage", tags=["storage"])
+router.include_router(quota.router)
