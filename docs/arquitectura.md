@@ -136,6 +136,23 @@ guardados vencidos y libera su espacio; `delete_unused_objects` borra los archiv
 en dos pasadas (primero los marca `pending_deletion`, en la siguiente borra los bytes), para que un fallo
 nunca deje un archivo `ready` sin bytes; `reconcile_storage_quotas` recalcula el cupo.
 
+## Abrir un documento y restaurar una versión (VEC-42)
+
+**Abrir** (`GET /documents/{id}/content`, `documents/service/open.py`): comprueba que el documento es de la
+cuenta (si no, **404** y ninguna URL) y devuelve una URL firmada de un solo `GET` por archivo de la revisión
+actual (JSON, miniatura e imágenes), válida 10 minutos como máximo. Cuando caducan, el editor vuelve a pedir.
+También devuelve `account_id` y `workspace_id`, para que el editor separe su caché sin red por cuenta. Un
+borrador nunca guardado responde sin archivos (`revision: null`).
+
+**Restaurar** (`POST /documents/{id}/versions/{version_id}/restore`, `documents/service/versions.py`):
+publica la revisión de la versión como la **siguiente** revisión, con los mismos archivos (no se copian
+bytes). El número siempre sube: restaurar la 3 con la 7 vigente crea la 8. La revisión que estaba vigente se
+guarda como versión `restore` (`undo_version_id`), así que restaurarla deshace la restauración. Pide la
+revisión que el editor tiene en pantalla: si otra se guardó mientras tanto, **409** y no cambia nada.
+
+Guardar y restaurar publican con la misma función (`documents/service/revisions.py`), con el mismo orden de
+bloqueo: cupo, documento, archivos.
+
 ## Inicio de sesión y sesiones (VEC-4)
 
 Dos formas de entrar, las dos sin contraseña. La primera vez se crean el usuario (`auth.users`) y su cuenta

@@ -8,14 +8,19 @@ What goes here:
 
 Uses `app.storage.service` for files and quotas; never touches S3 directly.
 
-How to split: one file per use case (e.g. `save.py`, `open.py`) in this folder,
-imported here so other code keeps importing from `app.documents.service`.
-`app/auth/models/` is an example.
+One file per use case, imported here so other code imports from `app.documents.service`:
+- access.py: ownership checks and the fixed lock order (quota, document, files).
+- accounts.py: the product account of a signed-in user (used by auth).
+- save.py: the transactional save (VEC-31).
+- revisions.py: publishing a revision and reading its files (save and restore).
+- open.py: opening a document with signed URLs (VEC-42).
+- versions.py: restoring a version as a new revision (VEC-42).
 """
 
+from app.documents.service.access import DocumentNotFound
 from app.documents.service.accounts import find_account_id, get_or_create_account
+from app.documents.service.open import open_document
 from app.documents.service.save import (
-    DocumentNotFound,
     IdempotencyKeyReused,
     SaveConflict,
     SaveExpired,
@@ -26,18 +31,29 @@ from app.documents.service.save import (
     create_save,
     read_save,
 )
+from app.documents.service.versions import (
+    RestoreConflict,
+    VersionNotFound,
+    VersionUnavailable,
+    restore_version,
+)
 
 __all__ = [
     "DocumentNotFound",
     "IdempotencyKeyReused",
+    "RestoreConflict",
     "SaveConflict",
     "SaveExpired",
     "SaveFilesMissing",
     "SaveNotFound",
     "SaveRejected",
+    "VersionNotFound",
+    "VersionUnavailable",
     "commit_save",
     "create_save",
     "find_account_id",
     "get_or_create_account",
+    "open_document",
     "read_save",
+    "restore_version",
 ]
