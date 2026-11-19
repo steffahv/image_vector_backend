@@ -40,8 +40,24 @@ class Settings(BaseSettings):
     # parent domain (e.g. `vectoredit.com`) when the agent runs on a sibling subdomain.
     session_cookie_domain: str | None = None
 
+    # S3-compatible storage for document files (AWS S3, Cloudflare R2, MinIO...). Optional only
+    # in development: without them the routes that move files answer 503. The endpoint is empty
+    # for AWS itself and set for every other provider.
+    s3_endpoint_url: str | None = None
+    s3_region: str = "us-east-1"
+    s3_bucket: str | None = None
+    s3_access_key_id: str | None = None
+    s3_secret_access_key: SecretStr | None = None
+
     @field_validator(
-        "google_client_id", "google_client_secret", "session_cookie_domain", mode="before"
+        "google_client_id",
+        "google_client_secret",
+        "session_cookie_domain",
+        "s3_endpoint_url",
+        "s3_bucket",
+        "s3_access_key_id",
+        "s3_secret_access_key",
+        mode="before",
     )
     @classmethod
     def _empty_is_unset(cls, value: object) -> object:
@@ -60,10 +76,16 @@ class Settings(BaseSettings):
             return self
         if not self.google_client_id or self.google_client_secret is None:
             raise ValueError("GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET are required")
+        if not self.s3_configured:
+            raise ValueError("S3_BUCKET, S3_ACCESS_KEY_ID and S3_SECRET_ACCESS_KEY are required")
         for name in ("frontend_url", "api_url"):
             if not getattr(self, name).startswith("https://"):
                 raise ValueError(f"{name.upper()} must use https outside development")
         return self
+
+    @property
+    def s3_configured(self) -> bool:
+        return bool(self.s3_bucket and self.s3_access_key_id and self.s3_secret_access_key)
 
     @property
     def api_docs_enabled(self) -> bool:

@@ -1,0 +1,497 @@
+"""Saving a document (VEC-31): nothing is lost or duplicated, whatever step fails.
+
+Requests run as the platform database role (`as_role`), not as the superuser tests connect with,
+so row-level security applies as in production. Storage is an in-memory bucket: the browser's
+upload is simulated by writing the bytes to the key its signed URL points to.
+"""
+
+import gzip
+import hashlib
+import json
+import uuid
+from collections.abc import Callable, Iterator
+from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
+from io import BytesIO
+from typing import Any
+
+import pytest
+from fastapi.testclient import TestClient
+from httpx2 import Response
+from PIL import Image
+from sqlalchemy import func, select, text, update
+from sqlalchemy.orm import Session
+
+from app.auth.service import CurrentUser, get_current_user
+from app.core.config import get_settings
+from app.core.db import PLATFORM_ROLE, get_db, set_current_account
+from app.documents.models import (
+    Account,
+    Document,
+    DocumentRevision,
+    DocumentStatus,
+    RevisionImage,
+    Workspace,
+)
+from app.documents.router.responses import object_store
+from app.main import app
+from app.storage.models import (
+    ByteReservation,
+    ByteReservationStatus,
+    DocumentSave,
+    ObjectKind,
+    ObjectStatus,
+    SaveStatus,
+    StoredObject,
+    Upload,
+    UploadStatus,
+    WorkspaceQuota,
+)
+from tests.conftest import as_role
+from tests.factories import make_account, make_document, make_quota, make_workspace
+from tests.fake_storage import MemoryObjectStore
+
+LIMIT = 10_000_000
+
+
+def png(width: int = 4, height: int = 3, color: tuple[int, int, int] = (255, 0, 0)) -> bytes:
+    buffer = BytesIO()
+    Image.new("RGB", (width, height), color).save(buffer, "PNG")
+    return buffer.getvalue()
+
+
+def describe(data: bytes, mime_type: str, **extra: object) -> dict[str, Any]:
+    return {
+        "sha256": hashlib.sha256(data).hexdigest(),
+        "size_bytes": len(data),
+        "mime_type": mime_type,
+    } | extra
+
+
+@dataclass
+class Draft:
+    """A save request and the bytes the browser would upload for it."""
+
+    document: bytes
+    original_bytes: int
+    thumbnail: bytes | None = None
+    images: dict[str, bytes] = field(default_factory=dict)
+    idempotency_key: uuid.UUID = field(default_factory=uuid.uuid4)
+
+    @classmethod
+    def of(
+        cls, content: dict[str, Any] | None = None, images: dict[str, bytes] | None = None
+    ) -> "Draft":
+        text = json.dumps(content or {"pages": [{"id": "p1"}]}).encode()
+        return cls(gzip.compress(text), len(text), png(8, 6), images or {"img-1": png()})
+
+    def body(self, base_revision: int) -> dict[str, Any]:
+        return {
+            "idempotency_key": str(self.idempotency_key),
+            "base_revision": base_revision,
+            "document": describe(
+                self.document,
+                "application/json",
+                gzip=True,
+                original_bytes=self.original_bytes,
+                format_version=1,
+            ),
+            "thumbnail": None
+            if self.thumbnail is None
+            else describe(self.thumbnail, "image/png", width=8, height=6),
+            "images": [
+                describe(
+                    data, "image/png", editor_hash=name, width=_size(data)[0], height=_size(data)[1]
+                )
+                for name, data in self.images.items()
+            ],
+        }
+
+    def bytes_for(self, target: dict[str, Any]) -> bytes:
+        if target["role"] == "document":
+            return self.document
+        if target["role"] == "thumbnail":
+            assert self.thumbnail is not None
+            return self.thumbnail
+        return self.images[target["editor_hash"]]
+
+
+def _size(data: bytes) -> tuple[int, int]:
+    with Image.open(BytesIO(data)) as image:
+        return image.size
+
+
+@dataclass
+class Api:
+    client: TestClient
+    store: MemoryObjectStore
+    db: Session
+    account: Account
+    workspace: Workspace
+    document: Document
+
+    @property
+    def doc_url(self) -> str:
+        return f"/api/v1/documents/{self.document.id}"
+
+    def prepare(self, draft: Draft, base_revision: int = 0) -> Response:
+        return self.client.post(f"{self.doc_url}/saves", json=draft.body(base_revision))
+
+    def upload(self, draft: Draft, save: dict[str, Any], *, skip: str | None = None) -> None:
+        """What the browser does with each signed URL."""
+        for target in save["uploads"]:
+            if target["role"] != skip:
+                self.store.files[self.store.key_of(target["url"])] = draft.bytes_for(target)
+
+    def commit(self, save_id: str) -> Response:
+        return self.client.post(f"{self.doc_url}/saves/{save_id}/commit")
+
+    def save(self, draft: Draft, base_revision: int = 0) -> Response:
+        prepared = self.prepare(draft, base_revision)
+        assert prepared.status_code == 201, prepared.text
+        self.upload(draft, prepared.json())
+        return self.commit(prepared.json()["id"])
+
+    def quota(self) -> WorkspaceQuota:
+        self.db.expire_all()
+        return self.db.get_one(WorkspaceQuota, self.workspace.id)
+
+    def current_revision(self) -> int | None:
+        self.db.expire_all()
+        return self.db.get_one(Document, self.document.id).current_revision
+
+    def count(self, model: type, *conditions: Any) -> int:
+        return self.db.scalar(select(func.count()).select_from(model).where(*conditions)) or 0
+
+
+@pytest.fixture
+def api(db: Session) -> Iterator[Api]:
+    account = make_account(db)
+    workspace = make_workspace(db, account)
+    make_quota(db, workspace, limit_bytes=LIMIT)
+    document = make_document(db, workspace)
+    store = MemoryObjectStore()
+    as_role(db, PLATFORM_ROLE)
+
+    def signed_in() -> CurrentUser:
+        set_current_account(db, account.id)
+        return CurrentUser(account.auth_user_id, account.id, "ana@example.com", "Ana", None)
+
+    app.dependency_overrides[get_db] = lambda: db
+    app.dependency_overrides[get_current_user] = signed_in
+    app.dependency_overrides[object_store] = lambda: store
+    client = TestClient(
+        app, base_url="https://testserver", headers={"Origin": get_settings().frontend_url}
+    )
+    try:
+        yield Api(client, store, db, account, workspace, document)
+    finally:
+        app.dependency_overrides.clear()
+
+
+# The whole flow
+
+
+def test_a_draft_is_saved_and_becomes_revision_1(api: Api) -> None:
+    draft = Draft.of()
+    prepared = api.prepare(draft)
+    assert prepared.status_code == 201
+    roles = sorted(target["role"] for target in prepared.json()["uploads"])
+    assert roles == ["document", "image", "thumbnail"]
+    total = len(draft.document) + len(draft.thumbnail or b"") + len(draft.images["img-1"])
+    assert api.quota().reserved_bytes == total
+
+    api.upload(draft, prepared.json())
+    committed = api.commit(prepared.json()["id"])
+
+    assert committed.status_code == 200, committed.text
+    assert committed.json() | {"uploads": []} == committed.json()
+    assert (committed.json()["status"], committed.json()["revision"]) == ("confirmed", 1)
+    api.db.expire_all()
+    document = api.db.get_one(Document, api.document.id)
+    assert (document.current_revision, document.status) == (1, DocumentStatus.ACTIVE)
+    images = api.db.scalars(select(RevisionImage)).all()
+    assert [(image.revision, image.editor_hash) for image in images] == [(1, "img-1")]
+    quota = api.quota()
+    assert (quota.used_bytes, quota.reserved_bytes) == (total, 0)
+    # The temporary keys are gone; the files live under their final keys, all referenced.
+    assert all(key.startswith("objects/") for key in api.store.files)
+    stored = api.db.scalars(select(StoredObject)).all()
+    assert len(stored) == 3
+    assert all(o.unreferenced_since is None and o.status == ObjectStatus.READY for o in stored)
+
+
+def test_the_next_save_builds_on_the_current_revision(api: Api) -> None:
+    assert api.save(Draft.of()).json()["revision"] == 1
+    second = api.save(Draft.of({"pages": []}), base_revision=1)
+
+    assert second.json()["revision"] == 2
+    assert api.current_revision() == 2
+
+
+# Lost responses and retries
+
+
+def test_a_retried_prepare_returns_the_same_save_without_holding_space_twice(api: Api) -> None:
+    draft = Draft.of()
+    first = api.prepare(draft)
+    again = api.prepare(draft)
+
+    assert (first.status_code, again.status_code) == (201, 200)
+    assert again.json()["id"] == first.json()["id"]
+    assert api.count(DocumentSave) == 1
+    assert api.count(Upload) == 3
+    total = len(draft.document) + len(draft.thumbnail or b"") + len(draft.images["img-1"])
+    assert api.quota().reserved_bytes == total
+
+
+def test_a_retry_after_a_lost_commit_answer_returns_the_saved_revision(api: Api) -> None:
+    draft = Draft.of()
+    prepared = api.prepare(draft)
+    api.upload(draft, prepared.json())
+    api.commit(prepared.json()["id"])
+
+    commit_again = api.commit(prepared.json()["id"])
+    prepare_again = api.prepare(draft)
+
+    assert (commit_again.json()["status"], commit_again.json()["revision"]) == ("confirmed", 1)
+    assert (prepare_again.status_code, prepare_again.json()["revision"]) == (200, 1)
+    assert api.count(DocumentRevision) == 1
+    assert api.current_revision() == 1
+
+
+def test_an_idempotency_key_reused_for_another_request_is_refused(api: Api) -> None:
+    draft = Draft.of()
+    api.prepare(draft)
+    other = Draft.of({"pages": []})
+    other.idempotency_key = draft.idempotency_key
+
+    response = api.prepare(other)
+
+    assert response.status_code == 422
+    assert api.count(DocumentSave) == 1
+
+
+# Two devices
+
+
+def test_a_save_from_a_stale_revision_conflicts_and_never_overwrites(api: Api) -> None:
+    laptop, phone = Draft.of({"from": "laptop"}), Draft.of({"from": "phone"})
+    laptop_save = api.prepare(laptop).json()
+    phone_save = api.prepare(phone).json()
+    api.upload(laptop, laptop_save)
+    api.upload(phone, phone_save)
+
+    assert api.commit(laptop_save["id"]).json()["revision"] == 1
+    conflict = api.commit(phone_save["id"])
+
+    assert conflict.status_code == 409
+    assert conflict.json()["current_revision"] == 1
+    assert api.current_revision() == 1
+    assert api.count(DocumentRevision) == 1
+    assert api.db.get_one(DocumentSave, uuid.UUID(phone_save["id"])).status == SaveStatus.CONFLICT
+    assert api.quota().reserved_bytes == 0
+    # Asking again gives the same answer, not a second attempt.
+    assert api.commit(phone_save["id"]).status_code == 409
+
+
+def test_preparing_from_a_stale_revision_conflicts_before_anything_is_held(api: Api) -> None:
+    api.save(Draft.of())
+
+    response = api.prepare(Draft.of({"pages": []}), base_revision=0)
+
+    assert response.status_code == 409
+    assert response.json()["current_revision"] == 1
+    assert api.count(DocumentSave) == 1
+    assert api.quota().reserved_bytes == 0
+
+
+# Uploads that fail or stop half way
+
+
+def test_a_commit_before_every_file_is_uploaded_keeps_the_save_open(api: Api) -> None:
+    draft = Draft.of()
+    prepared = api.prepare(draft).json()
+    api.upload(draft, prepared, skip="image")
+
+    missing = api.commit(prepared["id"])
+
+    assert missing.status_code == 422
+    assert api.current_revision() is None
+    reread = api.client.get(f"{api.doc_url}/saves/{prepared['id']}").json()
+    assert reread["status"] == "preparing"
+    assert [target["role"] for target in reread["uploads"]] == ["image"]
+
+    api.upload(draft, reread)
+    assert api.commit(prepared["id"]).json()["revision"] == 1
+
+
+def _flip_last_byte(data: bytes) -> bytes:
+    return data[:-1] + bytes([data[-1] ^ 1])
+
+
+@pytest.mark.parametrize(
+    ("role", "tamper", "code"),
+    [
+        ("image", _flip_last_byte, "hash_mismatch"),
+        ("document", lambda data: data[:-1], "size_mismatch"),
+    ],
+)
+def test_a_file_that_is_not_what_was_declared_cancels_the_save(
+    api: Api, role: str, tamper: Callable[[bytes], bytes], code: str
+) -> None:
+    draft = Draft.of()
+    prepared = api.prepare(draft).json()
+    api.upload(draft, prepared)
+    target = next(t for t in prepared["uploads"] if t["role"] == role)
+    key = api.store.key_of(target["url"])
+    api.store.files[key] = tamper(api.store.files[key])
+
+    response = api.commit(prepared["id"])
+
+    assert response.status_code == 422
+    assert code in response.json()["detail"]
+    assert api.current_revision() is None
+    save = api.db.get_one(DocumentSave, uuid.UUID(prepared["id"]))
+    assert save.status == SaveStatus.CANCELED
+    rejected = api.db.get_one(Upload, uuid.UUID(target["upload_id"]))
+    assert (rejected.status, rejected.error_code) == (UploadStatus.REJECTED, code)
+    assert api.quota().reserved_bytes == 0
+    assert api.commit(prepared["id"]).status_code == 422
+
+
+def test_a_commit_of_an_expired_save_gives_the_space_back(api: Api) -> None:
+    draft = Draft.of()
+    prepared = api.prepare(draft).json()
+    api.upload(draft, prepared)
+    api.db.execute(update(DocumentSave).values(expires_at=datetime.now(UTC) - timedelta(seconds=1)))
+
+    response = api.commit(prepared["id"])
+
+    assert response.status_code == 410
+    assert api.current_revision() is None
+    assert api.quota().reserved_bytes == 0
+    assert api.count(Upload, Upload.status == UploadStatus.EXPIRED) == 3
+
+
+def test_a_file_another_commit_is_checking_is_not_checked_twice(api: Api) -> None:
+    draft = Draft.of()
+    prepared = api.prepare(draft).json()
+    api.upload(draft, prepared)
+    api.db.execute(
+        update(Upload).values(
+            status=UploadStatus.VERIFYING, lease_until=datetime.now(UTC) + timedelta(minutes=1)
+        )
+    )
+
+    busy = api.commit(prepared["id"])
+    assert (busy.status_code, busy.json()["status"]) == (200, "preparing")
+
+    # A commit that crashed loses its lease, and the next one takes over.
+    api.db.execute(update(Upload).values(lease_until=datetime.now(UTC) - timedelta(seconds=1)))
+    assert api.commit(prepared["id"]).json()["revision"] == 1
+
+
+# Space
+
+
+def test_a_save_that_would_pass_the_limit_is_refused_before_any_upload(api: Api) -> None:
+    set_current_account(api.db, api.account.id)
+    api.db.execute(update(WorkspaceQuota).values(limit_bytes=100))
+
+    response = api.prepare(Draft.of())
+
+    assert response.status_code == 507
+    assert api.count(DocumentSave) == 0
+    assert api.quota().reserved_bytes == 0
+
+
+# One image, stored once
+
+
+def test_an_image_used_in_several_revisions_is_stored_once(api: Api) -> None:
+    logo = png(5, 5, (0, 255, 0))
+    api.save(Draft.of(images={"logo": logo}))
+
+    second = Draft.of({"pages": []}, images={"logo-again": logo})
+    prepared = api.prepare(second, base_revision=1).json()
+
+    assert "image" not in [target["role"] for target in prepared["uploads"]]
+    api.upload(second, prepared)
+    assert api.commit(prepared["id"]).json()["revision"] == 2
+    image_objects = api.db.scalars(
+        select(StoredObject).where(StoredObject.kind == ObjectKind.IMAGE)
+    ).all()
+    assert len(image_objects) == 1
+    maps = api.db.scalars(select(RevisionImage.image_object_id)).all()
+    assert set(maps) == {image_objects[0].id}
+
+
+def test_the_same_image_uploaded_by_two_saves_at_once_is_kept_once(api: Api) -> None:
+    logo = png(5, 5, (0, 255, 0))
+    first, second = Draft.of(images={"a": logo}), Draft.of({"pages": []}, images={"b": logo})
+    first_save, second_save = api.prepare(first).json(), api.prepare(second).json()
+    api.upload(first, first_save)
+    api.upload(second, second_save)
+
+    api.commit(first_save["id"])
+    conflict = api.commit(second_save["id"])
+
+    assert conflict.status_code == 409
+    assert api.count(StoredObject, StoredObject.kind == ObjectKind.IMAGE) == 1
+    # The second copy was dropped and its space given back; the image counts once.
+    image_keys = [k for k in api.store.files if k.startswith("objects/")]
+    assert len(image_keys) == api.count(StoredObject)
+    stored = api.db.scalar(select(func.sum(StoredObject.size_bytes))) or 0
+    assert api.quota().used_bytes == stored
+    assert api.count(ByteReservation, ByteReservation.status == ByteReservationStatus.RESERVED) == 0
+
+
+# Ownership
+
+
+def test_another_accounts_document_and_saves_are_not_found(api: Api, db: Session) -> None:
+    draft = Draft.of()
+    mine = api.prepare(draft).json()
+    db.execute(text("RESET ROLE"))
+    other_owner = make_account(db, "luis@example.com")
+    as_role(db, PLATFORM_ROLE)
+
+    def as_luis() -> CurrentUser:
+        set_current_account(db, other_owner.id)
+        return CurrentUser(other_owner.auth_user_id, other_owner.id, "luis@example.com", "", None)
+
+    app.dependency_overrides[get_current_user] = as_luis
+
+    assert api.prepare(Draft.of()).status_code == 404
+    assert api.client.get(f"{api.doc_url}/saves/{mine['id']}").status_code == 404
+    assert api.commit(mine["id"]).status_code == 404
+
+
+def test_a_save_id_of_another_document_is_not_found(api: Api, db: Session) -> None:
+    draft = Draft.of()
+    save = api.prepare(draft).json()
+    other = Document(
+        workspace_id=api.workspace.id,
+        name="Other",
+        format="a4",
+        width=1.0,
+        height=1.0,
+        source=api.document.source,
+        status=DocumentStatus.DRAFT,
+    )
+    db.add(other)
+    db.flush()
+
+    assert (
+        api.client.post(f"/api/v1/documents/{other.id}/saves/{save['id']}/commit").status_code
+        == 404
+    )
+
+
+def test_without_storage_configured_the_save_routes_answer_503(api: Api) -> None:
+    del app.dependency_overrides[object_store]
+    assert not get_settings().s3_configured
+
+    assert api.prepare(Draft.of()).status_code == 503
+    assert api.count(DocumentSave) == 0

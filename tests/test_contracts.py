@@ -1,8 +1,9 @@
 """Published contracts of the documents and storage routes (VEC-31, VEC-42, VEC-43).
 
-The routes answer 501 until their logic is written. These tests pin what the editor builds
-against: every route is in Swagger, needs a session (except reading a shared document), accepts
-a valid body and refuses input past its limits.
+Routes answer 501 until their logic is written; implemented ones have their own tests (the
+saves: tests/test_document_saves.py). These tests pin what the editor builds against: every
+route is in Swagger, needs a session (except reading a shared document), accepts a valid body
+and refuses input past its limits.
 """
 
 import uuid
@@ -14,7 +15,9 @@ from fastapi.testclient import TestClient
 
 from app.auth.service import CurrentUser, get_current_user
 from app.core.config import get_settings
+from app.documents.router.responses import object_store
 from app.main import app
+from tests.fake_storage import MemoryObjectStore
 
 DOC = f"/api/v1/documents/{uuid.uuid4()}"
 SHA = "a" * 64
@@ -51,9 +54,6 @@ SIGNED_IN_ROUTES: list[tuple[str, str, dict[str, Any] | None]] = [
     ("POST", f"{DOC}/duplicate", {}),
     ("POST", f"{DOC}/trash", None),
     ("POST", f"{DOC}/restore", None),
-    ("POST", f"{DOC}/saves", SAVE_BODY),
-    ("GET", f"{DOC}/saves/{uuid.uuid4()}", None),
-    ("POST", f"{DOC}/saves/{uuid.uuid4()}/commit", None),
     ("GET", f"{DOC}/content", None),
     ("GET", f"{DOC}/versions", None),
     ("POST", f"{DOC}/versions", {"source": "manual", "label": "Before the client call"}),
@@ -66,6 +66,12 @@ SIGNED_IN_ROUTES: list[tuple[str, str, dict[str, Any] | None]] = [
     ("GET", f"{DOC}/share-links", None),
     ("DELETE", f"{DOC}/share-links/{uuid.uuid4()}", None),
     ("GET", "/api/v1/storage/quota", None),
+]
+# Implemented: tested with a database in tests/test_document_saves.py.
+SAVE_ROUTES: list[tuple[str, str, dict[str, Any] | None]] = [
+    ("POST", f"{DOC}/saves", SAVE_BODY),
+    ("GET", f"{DOC}/saves/{uuid.uuid4()}", None),
+    ("POST", f"{DOC}/saves/{uuid.uuid4()}/commit", None),
 ]
 
 
@@ -88,6 +94,8 @@ def signed_in() -> Iterator[None]:
         name="Ana",
         image_url=None,
     )
+    # Storage is resolved before the body is validated: without it a bad body would get 503.
+    app.dependency_overrides[object_store] = MemoryObjectStore
     try:
         yield
     finally:
@@ -98,7 +106,7 @@ def _call(client: TestClient, method: str, path: str, body: dict[str, Any] | Non
     return client.request(method, path, json=body).status_code
 
 
-@pytest.mark.parametrize(("method", "path", "body"), SIGNED_IN_ROUTES)
+@pytest.mark.parametrize(("method", "path", "body"), SIGNED_IN_ROUTES + SAVE_ROUTES)
 def test_every_route_needs_a_session(
     client: TestClient, method: str, path: str, body: dict[str, Any] | None
 ) -> None:
@@ -148,7 +156,7 @@ def test_input_past_its_limits_is_refused(
 def test_every_route_is_in_swagger(client: TestClient) -> None:
     paths = client.get("/api/v1/openapi.json").json()["paths"]
     published = {(method.upper(), path) for path, item in paths.items() for method in item}
-    for method, path, _ in SIGNED_IN_ROUTES:
+    for method, path, _ in SIGNED_IN_ROUTES + SAVE_ROUTES:
         template = path.replace(DOC, "/api/v1/documents/{document_id}")
         assert any(m == method and _matches(template, p) for m, p in published), (
             f"{method} {path} is not in the OpenAPI schema"

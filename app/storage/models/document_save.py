@@ -1,6 +1,7 @@
 import uuid
 from datetime import datetime
 from enum import StrEnum
+from typing import Any
 
 from sqlalchemy import (
     BigInteger,
@@ -10,6 +11,7 @@ from sqlalchemy import (
     Index,
     UniqueConstraint,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.model_base import Base, CreatedAt, DbSchema, UUIDPrimaryKey, text_enum
@@ -53,6 +55,9 @@ class DocumentSave(UUIDPrimaryKey, CreatedAt, Base):
     account_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("platform.accounts.id"), index=True)
     idempotency_key: Mapped[uuid.UUID]
     request_fingerprint: Mapped[bytes]
+    # What the editor declared for each file (size, type, hash, dimensions), checked against
+    # the uploaded bytes when the save is committed. Opaque to storage: documents writes it.
+    manifest: Mapped[dict[str, Any]] = mapped_column(JSONB)
     base_revision: Mapped[int] = mapped_column(BigInteger)
     result_revision: Mapped[int | None] = mapped_column(BigInteger)
     status: Mapped[SaveStatus] = mapped_column(text_enum(SaveStatus, "status"))

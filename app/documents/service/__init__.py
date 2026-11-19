@@ -14,5 +14,30 @@ imported here so other code keeps importing from `app.documents.service`.
 """
 
 from app.documents.service.accounts import find_account_id, get_or_create_account
+from app.documents.service.save import (
+    DocumentNotFound,
+    IdempotencyKeyReused,
+    SaveConflict,
+    SaveExpired,
+    SaveFilesMissing,
+    SaveNotFound,
+    SaveRejected,
+    commit_save,
+    create_save,
+    read_save,
+)
 
-__all__ = ["find_account_id", "get_or_create_account"]
+__all__ = [
+    "DocumentNotFound",
+    "IdempotencyKeyReused",
+    "SaveConflict",
+    "SaveExpired",
+    "SaveFilesMissing",
+    "SaveNotFound",
+    "SaveRejected",
+    "commit_save",
+    "create_save",
+    "find_account_id",
+    "get_or_create_account",
+    "read_save",
+]

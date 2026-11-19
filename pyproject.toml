@@ -21,6 +21,11 @@ files = ["app"]
 module = ["authlib.*"]
 ignore_missing_imports = true
 
+# boto3 ships no type hints. Only app/storage/service/object_store.py imports it.
+[[tool.mypy.overrides]]
+module = ["boto3.*", "botocore.*"]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 

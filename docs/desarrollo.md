@@ -214,10 +214,27 @@ Todas se leen en `app/core/config.py`. `.env` nunca se sube al repo; `.env.examp
 | `API_URL` | Dónde corre esta API. Google vuelve a `<API_URL>/api/v1/auth/google/callback`. | `http://localhost:8000` |
 | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | Inicio de sesión con Google. Opcionales en desarrollo (sin ellas, Google responde 503). | — |
 | `SESSION_COOKIE_DOMAIN` | Dominio de la cookie de sesión. Vacío en local; el dominio padre si el agente está en otro subdominio. | `vectoredit.com` |
+| `S3_ENDPOINT_URL` | Almacenamiento compatible con S3. Vacío para AWS; la URL para cualquier otro (R2, MinIO). | `http://localhost:9000` |
+| `S3_REGION`, `S3_BUCKET` | Región y bucket (privado) de los archivos de los documentos. | `us-east-1`, `vectoredit-dev` |
+| `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY` | Credenciales del bucket. Opcionales en desarrollo (sin ellas, guardar responde 503). | — |
 
 Si falta una variable obligatoria, la app no arranca y dice cuál falta. Fuera de desarrollo, además, son
-obligatorias las de Google y `FRONTEND_URL` y `API_URL` deben usar `https`.
-Las variables del almacenamiento S3 se agregan con `storage/` (VEC-42).
+obligatorias las de Google y las de S3, y `FRONTEND_URL` y `API_URL` deben usar `https`.
+
+### Almacenamiento S3 en local (MinIO)
+
+Para probar el guardado con archivos de verdad, sin cuenta en la nube:
+
+1. Descarga el ejecutable de MinIO para Windows (`minio.exe`) desde su página oficial y arráncalo:
+   `minio.exe server C:\minio-data --console-address :9001`. Por defecto escucha en `http://localhost:9000`.
+2. En la consola (`http://localhost:9001`) crea un bucket privado y un usuario con acceso a él.
+3. En `.env`: `S3_ENDPOINT_URL=http://localhost:9000`, `S3_BUCKET`, `S3_ACCESS_KEY_ID` y
+   `S3_SECRET_ACCESS_KEY` con esos valores.
+4. El navegador sube directo al bucket, así que el bucket necesita CORS que permita `PUT` y `GET` desde
+   `FRONTEND_URL` con la cabecera `Content-Type`.
+
+En cualquier proveedor, agrega una regla de caducidad que borre los objetos con prefijo `uploads/` después de
+un día: son las subidas temporales; los archivos confirmados viven en `objects/`.
 
 ## Iniciar sesión en local
 
@@ -311,6 +328,6 @@ No dejan datos: cada una se deshace al terminar.
 
 | Archivo | Qué lleva |
 |---|---|
-| `requirements.txt` | Lo que corre en producción. Incluye `httpx2`, que usan Authlib para hablar con Google y el `TestClient` de las pruebas. |
+| `requirements.txt` | Lo que corre en producción. Incluye `httpx2`, que usan Authlib para hablar con Google y el `TestClient` de las pruebas; `boto3`, el cliente de S3; y `pillow`, que revisa las imágenes subidas por su contenido. |
 | `requirements-dev.txt` | Lo anterior + pytest, ruff y mypy. |
 | `pyproject.toml` | Configuración de ruff, mypy y pytest. |

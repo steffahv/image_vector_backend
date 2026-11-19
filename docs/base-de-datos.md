@@ -54,6 +54,8 @@ Si una tabla tuya apunta a una de estas, usa estos nombres. **Todas existen:**
   `platform.document_versions` y `storage.objects`.
 - Migración `0006`: `platform.revision_images`, `platform.share_links`, `storage.saves`, `storage.uploads`,
   `storage.workspace_quotas` y `storage.byte_reservations`.
+- Migración `0018` (VEC-31): `storage.saves.manifest` (JSONB), lo que el editor declaró de cada archivo del
+  guardado. Al confirmar se compara con los bytes subidos y de ahí sale el mapa de imágenes de la revisión.
 
 Con eso están las 17 tablas de VEC-29.
 
