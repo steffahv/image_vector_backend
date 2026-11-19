@@ -20,16 +20,15 @@ from datetime import UTC, datetime
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.documents.models import (
-    Document,
-    DocumentRevision,
-    DocumentStatus,
-    RevisionAuthorType,
-    RevisionImage,
-    Workspace,
-)
+from app.documents.models import Document
 from app.documents.schemas import SaveCreate, SaveResponse, UploadRole, UploadTarget
 from app.documents.schemas.save import ImageFile, SavedFile
+from app.documents.service.access import (
+    lock_document,
+    lock_quota,
+    own_document_workspace,
+)
+from app.documents.service.revisions import RevisionFiles, publish_revision
 from app.storage import service as storage
 from app.storage.models import (
     DocumentSave,
@@ -45,10 +44,6 @@ _ROLES = {
     ObjectKind.THUMBNAIL: UploadRole.THUMBNAIL,
     ObjectKind.IMAGE: UploadRole.IMAGE,
 }
-
-
-class DocumentNotFound(Exception):
-    """Not a document of the account (or in the trash). Answered as 404, never 403."""
 
 
 class SaveNotFound(Exception):
@@ -92,8 +87,8 @@ def create_save(
 
     Returns the save and whether it was created now (False for a retry).
     """
-    workspace_id = _own_document_workspace(db, account_id, document_id)
-    quota = _lock_quota(db, workspace_id)
+    workspace_id = own_document_workspace(db, account_id, document_id)
+    quota = lock_quota(db, workspace_id)
     fingerprint = _fingerprint(request)
     existing = storage.find_save(db, document_id, request.idempotency_key)
     if existing is not None:
@@ -103,7 +98,7 @@ def create_save(
         db.commit()
         return response, False
 
-    document = _lock_document(db, workspace_id, document_id)
+    document = lock_document(db, workspace_id, document_id)
     current = document.current_revision or 0
     if request.base_revision != current:
         raise SaveConflict(current)
@@ -143,7 +138,7 @@ def read_save(
     document_id: uuid.UUID,
     save_id: uuid.UUID,
 ) -> SaveResponse:
-    workspace_id = _own_document_workspace(db, account_id, document_id, include_trash=True)
+    workspace_id = own_document_workspace(db, account_id, document_id, include_trash=True)
     save = storage.get_save(db, workspace_id, document_id, save_id)
     if save is None:
         raise SaveNotFound(str(save_id))
@@ -162,8 +157,8 @@ def commit_save(
     While another commit of the same save is still checking files, this one answers the save
     as `preparing` instead of waiting; the editor asks again.
     """
-    workspace_id = _own_document_workspace(db, account_id, document_id)
-    quota = _lock_quota(db, workspace_id)
+    workspace_id = own_document_workspace(db, account_id, document_id)
+    quota = lock_quota(db, workspace_id)
     save = _open_save(db, quota, workspace_id, document_id, save_id)
     if save.status == SaveStatus.CONFIRMED:
         response = _response(db, store, save)
@@ -202,8 +197,8 @@ def _publish(
     account_id: uuid.UUID,
 ) -> SaveResponse:
     """The short transaction: lock quota, document and files, check the base, publish."""
-    quota = _lock_quota(db, workspace_id)
-    document = _lock_document(db, workspace_id, document_id)
+    quota = lock_quota(db, workspace_id)
+    document = lock_document(db, workspace_id, document_id)
     save = _open_save(db, quota, workspace_id, document_id, save_id)
     if save.status == SaveStatus.CONFIRMED:
         response = _response(db, store, save)
@@ -218,40 +213,11 @@ def _publish(
     request = _request(save)
     try:
         files = _revision_files(db, workspace_id, save, request)
-        locked = storage.lock_ready_objects(db, workspace_id, list(set(files.values())))
+        revision = publish_revision(db, document, files, account_id)
     except storage.ObjectUnavailable:
         storage.end_save(db, quota, save, SaveStatus.CANCELED)
         db.commit()
         raise SaveRejected("A stored file is no longer available") from None
-
-    revision = current + 1
-    db.add(
-        DocumentRevision(
-            document_id=document_id,
-            revision=revision,
-            workspace_id=workspace_id,
-            json_object_id=files[_DOCUMENT],
-            thumbnail_object_id=files.get(_THUMBNAIL),
-            format_version=request.document.format_version,
-            original_json_bytes=request.document.original_bytes,
-            author_account_id=account_id,
-            author_type=RevisionAuthorType.ACCOUNT,
-        )
-    )
-    db.add_all(
-        RevisionImage(
-            document_id=document_id,
-            revision=revision,
-            editor_hash=image.editor_hash,
-            workspace_id=workspace_id,
-            image_object_id=files[image.sha256],
-        )
-        for image in request.images
-    )
-    document.current_revision = revision
-    if document.status == DocumentStatus.DRAFT:
-        document.status = DocumentStatus.ACTIVE
-    storage.mark_referenced(locked)
     storage.confirm_save(save, revision)
     db.flush()
     response = _response(db, store, save)
@@ -259,17 +225,18 @@ def _publish(
     return response
 
 
-# Keys of the revision's files besides images, which go by their SHA-256 in hex.
+# Keys of the save's files besides images, which go by their SHA-256 in hex.
 _DOCUMENT = "document"
 _THUMBNAIL = "thumbnail"
 
 
 def _revision_files(
     db: Session, workspace_id: uuid.UUID, save: DocumentSave, request: SaveCreate
-) -> dict[str, uuid.UUID]:
+) -> RevisionFiles:
     """Which stored file holds each file of the request."""
     uploads = storage.save_uploads(db, save)
     stored = storage.uploaded_objects(db, [upload.id for upload in uploads])
+    by_hash: dict[str, uuid.UUID] = {}
     files: dict[str, uuid.UUID] = {}
     for upload in uploads:
         object_id = stored.get(upload.id)
@@ -280,49 +247,20 @@ def _revision_files(
         elif upload.kind == ObjectKind.THUMBNAIL:
             files[_THUMBNAIL] = object_id
         elif upload.declared_sha256 is not None:
-            files[upload.declared_sha256.hex()] = object_id
-    reused = {image.sha256 for image in request.images} - files.keys()
+            by_hash[upload.declared_sha256.hex()] = object_id
+    reused = {image.sha256 for image in request.images} - by_hash.keys()
     found = storage.find_ready_images(db, workspace_id, [bytes.fromhex(h) for h in reused])
-    files |= {sha256.hex(): image.id for sha256, image in found.items()}
-    if reused - files.keys():
+    by_hash |= {sha256.hex(): image.id for sha256, image in found.items()}
+    if reused - by_hash.keys():
         # An image that was stored when the save started is gone now.
         raise storage.ObjectUnavailable(str(workspace_id))
-    return files
-
-
-def _own_document_workspace(
-    db: Session, account_id: uuid.UUID, document_id: uuid.UUID, *, include_trash: bool = False
-) -> uuid.UUID:
-    """The document's workspace, checked to be one the account owns. RLS is the second check."""
-    query = (
-        select(Document.workspace_id)
-        .join(Workspace, Workspace.id == Document.workspace_id)
-        .where(Document.id == document_id, Workspace.owner_id == account_id)
+    return RevisionFiles(
+        json_object_id=files[_DOCUMENT],
+        thumbnail_object_id=files.get(_THUMBNAIL),
+        format_version=request.document.format_version,
+        original_json_bytes=request.document.original_bytes,
+        images={image.editor_hash: by_hash[image.sha256] for image in request.images},
     )
-    if not include_trash:
-        query = query.where(Document.status != DocumentStatus.TRASH)
-    workspace_id = db.scalar(query)
-    if workspace_id is None:
-        raise DocumentNotFound(str(document_id))
-    return workspace_id
-
-
-def _lock_quota(db: Session, workspace_id: uuid.UUID) -> WorkspaceQuota:
-    try:
-        return storage.lock_quota(db, workspace_id)
-    except storage.QuotaMissing:
-        raise storage.InsufficientStorage(str(workspace_id)) from None
-
-
-def _lock_document(db: Session, workspace_id: uuid.UUID, document_id: uuid.UUID) -> Document:
-    document = db.scalar(
-        select(Document)
-        .where(Document.id == document_id, Document.workspace_id == workspace_id)
-        .with_for_update()
-    )
-    if document is None or document.status == DocumentStatus.TRASH:
-        raise DocumentNotFound(str(document_id))
-    return document
 
 
 def _open_save(
@@ -358,7 +296,7 @@ def _reject(
     upload_id: uuid.UUID,
     code: str,
 ) -> None:
-    quota = _lock_quota(db, workspace_id)
+    quota = lock_quota(db, workspace_id)
     save = storage.get_save(db, workspace_id, document_id, save_id, lock=True)
     if save is None or save.status != SaveStatus.PREPARING:
         db.commit()

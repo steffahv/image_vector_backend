@@ -13,9 +13,11 @@ One file per use case, imported here so other code imports from `app.storage.ser
 - quota.py: locking the workspace quota, holding and giving back space.
 - saves.py: a save's request, uploads and reservations.
 - objects.py: turning a checked upload into a stored file, reusing images, locking files.
+- downloads.py: signed downloads of stored files (opening a document, VEC-42).
 - maintenance.py: the cleanup the jobs queue runs (VEC-36).
 """
 
+from app.storage.service.downloads import SignedDownload, sign_downloads
 from app.storage.service.file_checks import ExpectedFile, FileRejected
 from app.storage.service.maintenance import (
     delete_unused_objects,
@@ -65,6 +67,7 @@ __all__ = [
     "ObjectUnavailable",
     "PlannedUpload",
     "QuotaMissing",
+    "SignedDownload",
     "SignedUpload",
     "StorageUnavailable",
     "UploadMissing",
@@ -84,6 +87,7 @@ __all__ = [
     "open_save",
     "reconcile_storage_quotas",
     "save_uploads",
+    "sign_downloads",
     "sign_upload",
     "store_upload",
     "uploaded_objects",

@@ -1,9 +1,11 @@
 import uuid
 
-from fastapi import APIRouter, status
+from fastapi import APIRouter, HTTPException, status
+from fastapi.responses import JSONResponse
 
 from app.core.not_implemented import not_implemented
-from app.documents.router.responses import OWN, SignedIn
+from app.documents import service
+from app.documents.router.responses import MINE, OWN, Db, SignedIn, not_found
 from app.documents.router.saves import CONFLICT
 from app.documents.schemas import (
     VersionCreate,
@@ -11,6 +13,7 @@ from app.documents.schemas import (
     VersionRestore,
     VersionRestoreResponse,
 )
+from app.documents.schemas.save import SaveConflictResponse
 
 router = APIRouter(prefix="/documents")
 
@@ -43,9 +46,32 @@ def create_version(
     "/{document_id}/versions/{version_id}/restore",
     response_model=VersionRestoreResponse,
     summary="Restore a version as a new revision",
-    responses=OWN | CONFLICT,
+    description=(
+        "Publishes the version's revision again as the next revision: the number always goes "
+        "up. The revision that was current is kept as a `restore` version (undo_version_id)."
+    ),
+    responses=MINE | CONFLICT,
 )
 def restore_version(
-    document_id: uuid.UUID, version_id: uuid.UUID, body: VersionRestore, current: SignedIn
-) -> VersionRestoreResponse:
-    not_implemented()
+    document_id: uuid.UUID,
+    version_id: uuid.UUID,
+    body: VersionRestore,
+    current: SignedIn,
+    db: Db,
+) -> VersionRestoreResponse | JSONResponse:
+    try:
+        return service.restore_version(
+            db, current.account_id, document_id, version_id, body.base_revision
+        )
+    except (service.DocumentNotFound, service.VersionNotFound):
+        raise not_found() from None
+    except service.RestoreConflict as conflict:
+        answer = SaveConflictResponse(
+            detail="Another revision was saved meanwhile. Nothing was changed.",
+            current_revision=conflict.current_revision,
+        )
+        return JSONResponse(answer.model_dump(), status_code=status.HTTP_409_CONFLICT)
+    except service.VersionUnavailable:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, detail="This version can no longer be restored."
+        ) from None

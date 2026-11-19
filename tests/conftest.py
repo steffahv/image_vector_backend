@@ -1,4 +1,5 @@
 from collections.abc import Iterator
+from typing import TYPE_CHECKING
 
 import pytest
 from sqlalchemy import func, select, text
@@ -7,6 +8,17 @@ from sqlalchemy.orm import Session
 from app.auth.models import AuthUser
 from app.core.db import engine
 from app.documents.models import Account, AgentMode
+
+if TYPE_CHECKING:
+    from tests.document_api import Api
+
+
+@pytest.fixture
+def api(db: Session) -> Iterator["Api"]:
+    """Ana signed in, with a workspace, space and a draft document (tests/document_api.py)."""
+    from tests.document_api import signed_in_api
+
+    yield from signed_in_api(db)
 
 
 @pytest.fixture

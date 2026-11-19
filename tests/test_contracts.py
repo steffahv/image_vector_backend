@@ -1,9 +1,9 @@
 """Published contracts of the documents and storage routes (VEC-31, VEC-42, VEC-43).
 
-Routes answer 501 until their logic is written; implemented ones have their own tests (the
-saves: tests/test_document_saves.py). These tests pin what the editor builds against: every
-route is in Swagger, needs a session (except reading a shared document), accepts a valid body
-and refuses input past its limits.
+Routes answer 501 until their logic is written; implemented ones have their own tests
+(tests/test_document_saves.py and tests/test_document_open.py). These tests pin what the editor
+builds against: every route is in Swagger, needs a session (except reading a shared document),
+accepts a valid body and refuses input past its limits.
 """
 
 import uuid
@@ -54,10 +54,8 @@ SIGNED_IN_ROUTES: list[tuple[str, str, dict[str, Any] | None]] = [
     ("POST", f"{DOC}/duplicate", {}),
     ("POST", f"{DOC}/trash", None),
     ("POST", f"{DOC}/restore", None),
-    ("GET", f"{DOC}/content", None),
     ("GET", f"{DOC}/versions", None),
     ("POST", f"{DOC}/versions", {"source": "manual", "label": "Before the client call"}),
-    ("POST", f"{DOC}/versions/{uuid.uuid4()}/restore", {"base_revision": 3}),
     ("GET", "/api/v1/folders", None),
     ("POST", "/api/v1/folders", {"name": "Clients"}),
     ("PATCH", f"/api/v1/folders/{uuid.uuid4()}", {"name": "Old clients"}),
@@ -67,11 +65,14 @@ SIGNED_IN_ROUTES: list[tuple[str, str, dict[str, Any] | None]] = [
     ("DELETE", f"{DOC}/share-links/{uuid.uuid4()}", None),
     ("GET", "/api/v1/storage/quota", None),
 ]
-# Implemented: tested with a database in tests/test_document_saves.py.
-SAVE_ROUTES: list[tuple[str, str, dict[str, Any] | None]] = [
+# Implemented: tested with a database in tests/test_document_saves.py and
+# tests/test_document_open.py.
+IMPLEMENTED_ROUTES: list[tuple[str, str, dict[str, Any] | None]] = [
     ("POST", f"{DOC}/saves", SAVE_BODY),
     ("GET", f"{DOC}/saves/{uuid.uuid4()}", None),
     ("POST", f"{DOC}/saves/{uuid.uuid4()}/commit", None),
+    ("GET", f"{DOC}/content", None),
+    ("POST", f"{DOC}/versions/{uuid.uuid4()}/restore", {"base_revision": 3}),
 ]
 
 
@@ -106,7 +107,7 @@ def _call(client: TestClient, method: str, path: str, body: dict[str, Any] | Non
     return client.request(method, path, json=body).status_code
 
 
-@pytest.mark.parametrize(("method", "path", "body"), SIGNED_IN_ROUTES + SAVE_ROUTES)
+@pytest.mark.parametrize(("method", "path", "body"), SIGNED_IN_ROUTES + IMPLEMENTED_ROUTES)
 def test_every_route_needs_a_session(
     client: TestClient, method: str, path: str, body: dict[str, Any] | None
 ) -> None:
@@ -156,7 +157,7 @@ def test_input_past_its_limits_is_refused(
 def test_every_route_is_in_swagger(client: TestClient) -> None:
     paths = client.get("/api/v1/openapi.json").json()["paths"]
     published = {(method.upper(), path) for path, item in paths.items() for method in item}
-    for method, path, _ in SIGNED_IN_ROUTES + SAVE_ROUTES:
+    for method, path, _ in SIGNED_IN_ROUTES + IMPLEMENTED_ROUTES:
         template = path.replace(DOC, "/api/v1/documents/{document_id}")
         assert any(m == method and _matches(template, p) for m, p in published), (
             f"{method} {path} is not in the OpenAPI schema"
