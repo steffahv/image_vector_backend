@@ -100,19 +100,41 @@ navegador ─HTTP─> router/ ─> service/ ─> models/ ─> PostgreSQL
 3. Solo `storage/` habla con S3.
 4. Lo compartido va en `core/`.
 
-## Ejemplo completo: guardar un documento
+## Ejemplo completo: guardar un documento (VEC-31)
 
-1. El editor pide a `documents/` guardar una revisión nueva, con la revisión base y una clave de idempotencia.
-2. `documents/router/` valida el cuerpo con `documents/schemas/` y llama a `documents/service/`.
-3. `documents/service/` usa `auth/service/` para saber quién llama y comprueba que sea dueño.
-4. Pide a `storage/service/` que reserve cupo y genere URLs firmadas.
-5. El navegador sube los archivos directo al bucket con esas URLs.
-6. `storage/service/` valida lo subido (tamaño, formato, hash) y lo mueve a claves definitivas.
-7. `documents/service/` abre una transacción corta: bloquea cupo, documento y archivos en ese orden,
-   comprueba que nadie guardó otra revisión, crea la revisión nueva y la marca como actual.
-8. Si otro dispositivo guardó antes, responde **409** y no pisa nada.
+Tres llamadas del editor (`documents/router/saves.py`); la lógica está en `documents/service/save.py` y la
+parte de archivos y cupo en `storage/service/`.
 
-Más tarde, `jobs/` libera el cupo si el guardado se cortó a la mitad y borra los archivos que quedaron sin uso.
+1. **Preparar** (`POST /documents/{id}/saves`): el editor manda la revisión base, una clave de idempotencia y
+   la descripción de cada archivo (hash, tamaño, tipo, dimensiones). `documents/` comprueba que el documento
+   es de la cuenta y que la revisión base es la actual (si no, **409**). `storage/` bloquea el cupo, reserva
+   los bytes (si no caben, **507**), registra el guardado con lo declarado y devuelve una URL firmada por
+   archivo (10 minutos como máximo). Las imágenes que ya están en el espacio no se vuelven a subir.
+2. **Subir**: el navegador sube cada archivo directo al bucket, a una clave temporal (`uploads/...`). La firma
+   incluye tamaño y tipo, así que el almacenamiento rechaza otro cuerpo.
+3. **Confirmar** (`POST /documents/{id}/saves/{save_id}/commit`): `storage/` lee cada archivo una vez, revisa
+   tamaño, hash, gzip y JSON o formato y dimensiones de imagen **leyendo los bytes**, y escribe esos mismos
+   bytes en su clave definitiva (`objects/...`), que ya no cambia. Después, en una transacción corta,
+   `documents/` bloquea cupo, documento y archivos en ese orden, comprueba otra vez la revisión base, crea la
+   revisión con su mapa de imágenes y la marca como actual. Solo una respuesta `confirmed` significa
+   «guardado».
+
+| Situación | Qué pasa |
+|---|---|
+| Se pierde una respuesta | Repetir con la misma clave devuelve el mismo guardado (200), confirmado si ya lo estaba. La misma clave con otro contenido: **422**. |
+| Otro dispositivo guardó antes | **409** con la revisión actual; el guardado queda en `conflict` y nunca pisa nada. |
+| Falta subir un archivo | **422**; el guardado sigue abierto: se sube y se confirma otra vez. `GET .../saves/{save_id}` devuelve URLs nuevas para lo que falta. |
+| Un archivo no es lo declarado | **422**; el guardado se cancela y libera su reserva. Hay que empezar otro. |
+| Dos confirmaciones a la vez | Cada archivo lo revisa una sola (con un plazo de 5 minutos); la otra responde `preparing` y el editor vuelve a preguntar. |
+| Pasan 30 minutos sin confirmar | **410**; la reserva se libera y sigue valiendo la revisión anterior. |
+| Falla la transacción | Los archivos ya guardados quedan sin uso (`unreferenced_since`) y se borran días después. |
+
+Una imagen se guarda una sola vez por espacio, aunque la usen muchas revisiones (índice único por hash).
+
+Más tarde, la cola de `jobs/` llama a `storage.service`: `expire_uploads_and_reservations` caduca los
+guardados vencidos y libera su espacio; `delete_unused_objects` borra los archivos sin uso hace más de 8 días
+en dos pasadas (primero los marca `pending_deletion`, en la siguiente borra los bytes), para que un fallo
+nunca deje un archivo `ready` sin bytes; `reconcile_storage_quotas` recalcula el cupo.
 
 ## Inicio de sesión y sesiones (VEC-4)
 

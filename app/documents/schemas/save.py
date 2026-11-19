@@ -3,14 +3,16 @@
 import uuid
 from datetime import datetime
 from enum import StrEnum
-from typing import Annotated
+from typing import Annotated, Literal, Self
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from app.storage.models import SaveStatus
 
 # Largest file of each kind the platform accepts. Checked again on the uploaded bytes.
 MAX_DOCUMENT_JSON_BYTES = 50 * 1024 * 1024
+# The uncompressed JSON is parsed in memory to check it, so it has its own limit.
+MAX_DOCUMENT_JSON_ORIGINAL_BYTES = 200 * 1024 * 1024
 MAX_IMAGE_BYTES = 25 * 1024 * 1024
 MAX_THUMBNAIL_BYTES = 2 * 1024 * 1024
 MAX_IMAGES_PER_SAVE = 500
@@ -37,13 +39,26 @@ class SavedFile(BaseModel):
 
 class DocumentJsonFile(SavedFile):
     size_bytes: Annotated[int, Field(gt=0, le=MAX_DOCUMENT_JSON_BYTES)]
+    mime_type: Literal["application/json"]
     gzip: bool = Field(default=True, description="Whether the JSON is uploaded gzip-compressed.")
-    original_bytes: Annotated[int, Field(gt=0, description="Size of the uncompressed JSON.")]
+    original_bytes: Annotated[
+        int,
+        Field(
+            gt=0, le=MAX_DOCUMENT_JSON_ORIGINAL_BYTES, description="Size of the uncompressed JSON."
+        ),
+    ]
     format_version: Annotated[int, Field(gt=0)]
+
+    @model_validator(mode="after")
+    def _uncompressed_size_matches(self) -> Self:
+        if not self.gzip and self.original_bytes != self.size_bytes:
+            raise ValueError("original_bytes must equal size_bytes when gzip is false")
+        return self
 
 
 class ThumbnailFile(SavedFile):
     size_bytes: Annotated[int, Field(gt=0, le=MAX_THUMBNAIL_BYTES)]
+    mime_type: Literal["image/png", "image/jpeg", "image/webp"]
     width: ImageSide
     height: ImageSide
 
@@ -58,6 +73,7 @@ class ImageFile(SavedFile):
         ),
     ]
     size_bytes: Annotated[int, Field(gt=0, le=MAX_IMAGE_BYTES)]
+    mime_type: Literal["image/png", "image/jpeg", "image/webp", "image/gif"]
     width: ImageSide
     height: ImageSide
 
@@ -76,6 +92,25 @@ class SaveCreate(BaseModel):
     document: DocumentJsonFile
     thumbnail: ThumbnailFile | None = None
     images: Annotated[list[ImageFile], Field(max_length=MAX_IMAGES_PER_SAVE)] = []
+
+    @model_validator(mode="after")
+    def _images_are_consistent(self) -> Self:
+        """One revision maps each editor hash once; equal bytes must be described equally.
+
+        Images with the same SHA-256 are uploaded and stored once, so they must agree on size,
+        type and dimensions.
+        """
+        editor_hashes = {image.editor_hash for image in self.images}
+        if len(editor_hashes) != len(self.images):
+            raise ValueError("each image needs a different editor_hash")
+        by_hash: dict[str, ImageFile] = {}
+        for image in self.images:
+            first = by_hash.setdefault(image.sha256, image)
+            if first.model_dump(exclude={"editor_hash"}) != image.model_dump(
+                exclude={"editor_hash"}
+            ):
+                raise ValueError("images with the same sha256 must have the same description")
+        return self
 
 
 class UploadRole(StrEnum):

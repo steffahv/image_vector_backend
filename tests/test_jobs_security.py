@@ -186,10 +186,24 @@ def test_real_worker_process_executes_in_the_jobs_account(monkeypatch: pytest.Mo
             assert db.scalars(select(Document.id)).all() == [document_ids[0]]
 
         monkeypatch.setattr("app.jobs.service.generate_export", generate_export, raising=False)
-        assert run_cycle(sessions, installed_handlers(), schedule=True) == 3
+        # The export job, plus each scheduled cleanup of storage once per workspace.
+        storage_jobs = (
+            "expire_uploads_and_reservations",
+            "delete_unused_objects",
+            "reconcile_storage_quotas",
+        )
+        expected_runs = 3 + len(storage_jobs) * len(workspace_ids)
+        assert run_cycle(sessions, installed_handlers(), schedule=True) == expected_runs
         assert run_cycle(sessions, installed_handlers()) == 0
         with Session(engine) as observer:
             assert observer.get_one(Job, job_id).status == JobStatus.COMPLETED
+            # They ran with the worker's real login: its privileges on storage are enough.
+            storage_statuses = observer.scalars(
+                select(Job.status).where(
+                    Job.type.in_(storage_jobs), Job.workspace_id.in_(workspace_ids)
+                )
+            ).all()
+            assert storage_statuses == [JobStatus.COMPLETED] * len(storage_statuses) != []
             assert observer.get_one(Document, document_ids[0]).name == "Exported"
             assert observer.get_one(Document, document_ids[1]).name == "Poster"
             expired = observer.scalars(select(Export).where(Export.job_id == old_job_id)).one()

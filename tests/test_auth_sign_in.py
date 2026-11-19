@@ -901,9 +901,11 @@ def test_google_answers_503_when_it_is_not_configured(
         ({"google_client_secret": ""}, "GOOGLE_CLIENT_SECRET"),
         ({"frontend_url": "http://editor.example"}, "FRONTEND_URL must use https"),
         ({"api_url": "http://api.example"}, "API_URL must use https"),
+        ({"s3_bucket": None}, "S3_BUCKET"),
+        ({"s3_secret_access_key": ""}, "S3_SECRET_ACCESS_KEY"),
     ],
 )
-def test_outside_development_google_and_https_are_required(
+def test_outside_development_google_storage_and_https_are_required(
     overrides: dict[str, object], error: str
 ) -> None:
     valid: dict[str, object] = {
@@ -913,6 +915,9 @@ def test_outside_development_google_and_https_are_required(
         "api_url": "https://api.example",
         "google_client_id": "id",
         "google_client_secret": "secret",
+        "s3_bucket": "documents",
+        "s3_access_key_id": "key-id",
+        "s3_secret_access_key": "secret",
     }
     Settings(_env_file=None, **valid)  # type: ignore[arg-type]  # values typed as object
     with pytest.raises(ValueError, match=error):

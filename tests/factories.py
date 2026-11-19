@@ -141,6 +141,7 @@ def make_save(db: Session, document: Document, **overrides: object) -> DocumentS
         "account_id": owner_id,
         "idempotency_key": uuid.uuid4(),
         "request_fingerprint": b"fingerprint",
+        "manifest": {},
         "base_revision": 0,
         "status": SaveStatus.PREPARING,
         "expires_at": in_one_hour(),
